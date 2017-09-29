@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,10 +16,11 @@
 
 #pragma once
 
-#include <functional>
-#include <iostream>
+#include <cstring>
 
-#include <boost/operators.hpp>
+#include <array>
+#include <functional>
+#include <iosfwd>
 
 #include <folly/Hash.h>
 #include <folly/Range.h>
@@ -51,8 +52,15 @@ typedef std::array<uint8_t, 4> ByteArray4;
  *
  * @see IPAddress
  */
-class IPAddressV4 : boost::totally_ordered<IPAddressV4> {
+class IPAddressV4 {
  public:
+  // Max size of std::string returned by toFullyQualified.
+  static constexpr size_t kMaxToFullyQualifiedSize =
+      4 /*words*/ * 3 /*max chars per word*/ + 3 /*separators*/;
+
+  // returns true iff the input string can be parsed as an ipv4-address
+  static bool validate(StringPiece ip);
+
   // create an IPAddressV4 instance from a uint32_t (network byte order)
   static IPAddressV4 fromLong(uint32_t src);
   // same as above but host byte order
@@ -67,6 +75,20 @@ class IPAddressV4 : boost::totally_ordered<IPAddressV4> {
     addr.setFromBinary(bytes);
     return addr;
   }
+
+  /**
+   * Returns the address as a Range.
+   */
+  ByteRange toBinary() const {
+    return ByteRange((const unsigned char*)&addr_.inAddr_.s_addr, 4);
+  }
+
+  /**
+   * Create a new IPAddress instance from the in-addr.arpa representation.
+   * @throws IPAddressFormatException if the input is not a valid in-addr.arpa
+   * representation
+   */
+  static IPAddressV4 fromInverseArpaName(const std::string& arpaname);
 
   /**
    * Convert a IPv4 address string to a long in network byte order.
@@ -98,6 +120,11 @@ class IPAddressV4 : boost::totally_ordered<IPAddressV4> {
   // Return the V6 mapped representation of the address.
   IPAddressV6 createIPv6() const;
 
+  /**
+   * Return a V6 address in the format of an 6To4 address.
+   */
+  IPAddressV6 getIPv6For6To4() const;
+
   // Return the long (network byte order) representation of the address.
   uint32_t toLong() const {
     return toAddr().s_addr;
@@ -113,7 +140,9 @@ class IPAddressV4 : boost::totally_ordered<IPAddressV4> {
    * @see IPAddress#bitCount
    * @returns 32
    */
-  static size_t bitCount() { return 32; }
+  static constexpr size_t bitCount() {
+    return 32;
+  }
 
   /**
    * @See IPAddress#toJson
@@ -153,7 +182,8 @@ class IPAddressV4 : boost::totally_ordered<IPAddressV4> {
 
   // @see IPAddress#isZero
   bool isZero() const {
-    return detail::Bytes::isZero(bytes(), 4);
+    constexpr auto zero = ByteArray4{{}};
+    return 0 == std::memcmp(bytes(), zero.data(), zero.size());
   }
 
   bool isLinkLocalBroadcast() const {
@@ -166,8 +196,12 @@ class IPAddressV4 : boost::totally_ordered<IPAddressV4> {
   // @see IPAddress#str
   std::string str() const;
 
+  std::string toInverseArpaName() const;
+
   // return underlying in_addr structure
-  in_addr toAddr() const { return addr_.inAddr_; }
+  in_addr toAddr() const {
+    return addr_.inAddr_;
+  }
 
   sockaddr_in toSockAddr() const {
     sockaddr_in addr;
@@ -180,14 +214,21 @@ class IPAddressV4 : boost::totally_ordered<IPAddressV4> {
   ByteArray4 toByteArray() const {
     ByteArray4 ba{{0}};
     std::memcpy(ba.data(), bytes(), 4);
-    return std::move(ba);
+    return ba;
   }
 
   // @see IPAddress#toFullyQualified
-  std::string toFullyQualified() const { return str(); }
+  std::string toFullyQualified() const {
+    return str();
+  }
+
+  // @see IPAddress#toFullyQualifiedAppend
+  void toFullyQualifiedAppend(std::string& out) const;
 
   // @see IPAddress#version
-  size_t version() const { return 4; }
+  uint8_t version() const {
+    return 4;
+  }
 
   /**
    * Return the mask associated with the given number of bits.
@@ -199,48 +240,47 @@ class IPAddressV4 : boost::totally_ordered<IPAddressV4> {
    */
   static const ByteArray4 fetchMask(size_t numBits);
 
-  // Given 2 IPAddressV4,mask pairs extract the longest common IPAddress,
+  // Given 2 IPAddressV4, mask pairs extract the longest common IPAddress,
   // mask pair
   static CIDRNetworkV4 longestCommonPrefix(
-    const CIDRNetworkV4& one, const CIDRNetworkV4& two) {
-    auto prefix =
-      detail::Bytes::longestCommonPrefix(one.first.addr_.bytes_, one.second,
-                                         two.first.addr_.bytes_, two.second);
-    return {IPAddressV4(prefix.first), prefix.second};
-  }
+      const CIDRNetworkV4& one,
+      const CIDRNetworkV4& two);
   // Number of bytes in the address representation.
-  static size_t byteCount() { return 4; }
-  //get nth most significant bit - 0 indexed
+  static size_t byteCount() {
+    return 4;
+  }
+  // get nth most significant bit - 0 indexed
   bool getNthMSBit(size_t bitIndex) const {
     return detail::getNthMSBitImpl(*this, bitIndex, AF_INET);
   }
-  //get nth most significant byte - 0 indexed
+  // get nth most significant byte - 0 indexed
   uint8_t getNthMSByte(size_t byteIndex) const;
-  //get nth bit - 0 indexed
+  // get nth bit - 0 indexed
   bool getNthLSBit(size_t bitIndex) const {
     return getNthMSBit(bitCount() - bitIndex - 1);
   }
-  //get nth byte - 0 indexed
+  // get nth byte - 0 indexed
   uint8_t getNthLSByte(size_t byteIndex) const {
     return getNthMSByte(byteCount() - byteIndex - 1);
   }
 
-  const unsigned char* bytes() const { return addr_.bytes_.data(); }
+  const unsigned char* bytes() const {
+    return addr_.bytes_.data();
+  }
 
  private:
   union AddressStorage {
-    static_assert(sizeof(in_addr) == sizeof(ByteArray4),
-                  "size of in_addr and ByteArray4 are different");
+    static_assert(
+        sizeof(in_addr) == sizeof(ByteArray4),
+        "size of in_addr and ByteArray4 are different");
     in_addr inAddr_;
     ByteArray4 bytes_;
     AddressStorage() {
       std::memset(this, 0, sizeof(AddressStorage));
     }
-    explicit AddressStorage(const ByteArray4 bytes): bytes_(bytes) {}
-    explicit AddressStorage(const in_addr addr): inAddr_(addr) {}
+    explicit AddressStorage(const ByteArray4 bytes) : bytes_(bytes) {}
+    explicit AddressStorage(const in_addr addr) : inAddr_(addr) {}
   } addr_;
-
-  static const std::array<ByteArray4, 33> masks_;
 
   /**
    * Set the current IPAddressV4 object to have the address specified by bytes.
@@ -267,14 +307,27 @@ inline bool operator==(const IPAddressV4& addr1, const IPAddressV4& addr2) {
 inline bool operator<(const IPAddressV4& addr1, const IPAddressV4& addr2) {
   return (addr1.toLongHBO() < addr2.toLongHBO());
 }
+// Derived operators
+inline bool operator!=(const IPAddressV4& a, const IPAddressV4& b) {
+  return !(a == b);
+}
+inline bool operator>(const IPAddressV4& a, const IPAddressV4& b) {
+  return b < a;
+}
+inline bool operator<=(const IPAddressV4& a, const IPAddressV4& b) {
+  return !(a > b);
+}
+inline bool operator>=(const IPAddressV4& a, const IPAddressV4& b) {
+  return !(a < b);
+}
 
-}  // folly
+} // namespace folly
 
 namespace std {
-template<>
+template <>
 struct hash<folly::IPAddressV4> {
   size_t operator()(const folly::IPAddressV4 addr) const {
     return addr.hash();
   }
 };
-}  // std
+} // namespace std

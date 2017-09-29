@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@
 /*
  * AtomicHashMap --
  *
- * A high performance concurrent hash map with int32 or int64 keys. Supports
+ * A high-performance concurrent hash map with int32 or int64 keys. Supports
  * insert, find(key), findAt(index), erase(key), size, and more.  Memory cannot
  * be freed or reclaimed by erase.  Can grow to a maximum of about 18 times the
  * initial capacity, but performance degrades linearly with growth. Can also be
@@ -25,7 +25,7 @@
  * internal storage (retrieved with iterator::getIndex()).
  *
  * Advantages:
- *    - High performance (~2-4x tbb::concurrent_hash_map in heavily
+ *    - High-performance (~2-4x tbb::concurrent_hash_map in heavily
  *      multi-threaded environments).
  *    - Efficient memory usage if initial capacity is not over estimated
  *      (especially for small keys and values).
@@ -56,7 +56,7 @@
  *   faster because of reduced data indirection.
  *
  *   AHMap is a wrapper around AHArray sub-maps that allows growth and provides
- *   an interface closer to the stl UnorderedAssociativeContainer concept. These
+ *   an interface closer to the STL UnorderedAssociativeContainer concept. These
  *   sub-maps are allocated on the fly and are processed in series, so the more
  *   there are (from growing past initial capacity), the worse the performance.
  *
@@ -79,16 +79,16 @@
  *
  */
 
-#ifndef FOLLY_ATOMICHASHMAP_H_
+#pragma once
 #define FOLLY_ATOMICHASHMAP_H_
 
 #include <boost/iterator/iterator_facade.hpp>
 #include <boost/noncopyable.hpp>
 #include <boost/type_traits/is_convertible.hpp>
 
-#include <stdexcept>
-#include <functional>
 #include <atomic>
+#include <functional>
+#include <stdexcept>
 
 #include <folly/AtomicHashArray.h>
 #include <folly/Foreach.h>
@@ -155,10 +155,18 @@ struct AtomicHashMapFullError : std::runtime_error {
   {}
 };
 
-template<class KeyT, class ValueT,
-         class HashFcn, class EqualFcn, class Allocator>
+template <
+    class KeyT,
+    class ValueT,
+    class HashFcn,
+    class EqualFcn,
+    class Allocator,
+    class ProbeFcn,
+    class KeyConvertFcn>
 class AtomicHashMap : boost::noncopyable {
-  typedef AtomicHashArray<KeyT, ValueT, HashFcn, EqualFcn, Allocator> SubMap;
+typedef AtomicHashArray<KeyT, ValueT, HashFcn, EqualFcn,
+                        Allocator, ProbeFcn, KeyConvertFcn>
+    SubMap;
 
  public:
   typedef KeyT                key_type;
@@ -166,6 +174,7 @@ class AtomicHashMap : boost::noncopyable {
   typedef std::pair<const KeyT, ValueT> value_type;
   typedef HashFcn             hasher;
   typedef EqualFcn            key_equal;
+  typedef KeyConvertFcn       key_convert;
   typedef value_type*         pointer;
   typedef value_type&         reference;
   typedef const value_type&   const_reference;
@@ -173,7 +182,7 @@ class AtomicHashMap : boost::noncopyable {
   typedef std::size_t         size_type;
   typedef typename SubMap::Config Config;
 
-  template<class ContT, class IterVal, class SubIt>
+  template <class ContT, class IterVal, class SubIt>
   struct ahm_iterator;
 
   typedef ahm_iterator<const AtomicHashMap,
@@ -191,11 +200,11 @@ class AtomicHashMap : boost::noncopyable {
   // The constructor takes a finalSizeEst which is the optimal
   // number of elements to maximize space utilization and performance,
   // and a Config object to specify more advanced options.
-  static const Config defaultConfig;
-  explicit AtomicHashMap(size_t finalSizeEst, const Config& = defaultConfig);
+  explicit AtomicHashMap(size_t finalSizeEst, const Config& c = Config());
 
   ~AtomicHashMap() {
-    const int numMaps = numMapsAllocated_.load(std::memory_order_relaxed);
+    const unsigned int numMaps =
+        numMapsAllocated_.load(std::memory_order_relaxed);
     FOR_EACH_RANGE (i, 0, numMaps) {
       SubMap* thisMap = subMaps_[i].load(std::memory_order_relaxed);
       DCHECK(thisMap);
@@ -205,8 +214,6 @@ class AtomicHashMap : boost::noncopyable {
 
   key_equal key_eq() const { return key_equal(); }
   hasher hash_function() const { return hasher(); }
-
-  // TODO: emplace() support would be nice.
 
   /*
    * insert --
@@ -224,23 +231,64 @@ class AtomicHashMap : boost::noncopyable {
    *   AtomicHashMapFullError is thrown.
    */
   std::pair<iterator,bool> insert(const value_type& r) {
-    return insert(r.first, r.second);
+    return emplace(r.first, r.second);
   }
-  std::pair<iterator,bool> insert(key_type k, const mapped_type& v);
+  std::pair<iterator,bool> insert(key_type k, const mapped_type& v) {
+    return emplace(k, v);
+  }
   std::pair<iterator,bool> insert(value_type&& r) {
-    return insert(r.first, std::move(r.second));
+    return emplace(r.first, std::move(r.second));
   }
-  std::pair<iterator,bool> insert(key_type k, mapped_type&& v);
+  std::pair<iterator,bool> insert(key_type k, mapped_type&& v) {
+    return emplace(k, std::move(v));
+  }
+
+  /*
+   * emplace --
+   *
+   *   Same contract as insert(), but performs in-place construction
+   *   of the value type using the specified arguments.
+   *
+   *   Also, like find(), this method optionally allows 'key_in' to have a type
+   *   different from that stored in the table; see find(). If and only if no
+   *   equal key is already present, this method converts 'key_in' to a key of
+   *   type KeyT using the provided LookupKeyToKeyFcn.
+   */
+  template <
+      typename LookupKeyT = key_type,
+      typename LookupHashFcn = hasher,
+      typename LookupEqualFcn = key_equal,
+      typename LookupKeyToKeyFcn = key_convert,
+      typename... ArgTs>
+  std::pair<iterator,bool> emplace(LookupKeyT k, ArgTs&&... vCtorArg);
 
   /*
    * find --
    *
-   *   Returns an iterator into the map.
+   *   Returns the iterator to the element if found, otherwise end().
    *
-   *   If the key is not found, returns end().
+   *   As an optional feature, the type of the key to look up (LookupKeyT) is
+   *   allowed to be different from the type of keys actually stored (KeyT).
+   *
+   *   This enables use cases where materializing the key is costly and usually
+   *   redudant, e.g., canonicalizing/interning a set of strings and being able
+   *   to look up by StringPiece. To use this feature, LookupHashFcn must take
+   *   a LookupKeyT, and LookupEqualFcn must take KeyT and LookupKeyT as first
+   *   and second parameter, respectively.
+   *
+   *   See folly/test/ArrayHashMapTest.cpp for sample usage.
    */
-  iterator find(key_type k);
-  const_iterator find(key_type k) const;
+  template <
+      typename LookupKeyT = key_type,
+      typename LookupHashFcn = hasher,
+      typename LookupEqualFcn = key_equal>
+  iterator find(LookupKeyT k);
+
+  template <
+      typename LookupKeyT = key_type,
+      typename LookupHashFcn = hasher,
+      typename LookupEqualFcn = key_equal>
+  const_iterator find(LookupKeyT k) const;
 
   /*
    * erase --
@@ -385,24 +433,33 @@ class AtomicHashMap : boost::noncopyable {
   static const uint32_t  kSubMapIndexShift_  = 32 - kNumSubMapBits_ - 1;
   static const uint32_t  kSubMapIndexMask_   = (1 << kSubMapIndexShift_) - 1;
   static const uint32_t  kNumSubMaps_        = 1 << kNumSubMapBits_;
-  static const uintptr_t kLockedPtr_         = 0x88ul << 48; // invalid pointer
+  static const uintptr_t kLockedPtr_         = 0x88ULL << 48; // invalid pointer
 
   struct SimpleRetT { uint32_t i; size_t j; bool success;
     SimpleRetT(uint32_t ii, size_t jj, bool s) : i(ii), j(jj), success(s) {}
-    SimpleRetT() {}
+    SimpleRetT() = default;
   };
 
-  template <class T>
-  SimpleRetT insertInternal(KeyT key, T&& value);
+  template <
+      typename LookupKeyT = key_type,
+      typename LookupHashFcn = hasher,
+      typename LookupEqualFcn = key_equal,
+      typename LookupKeyToKeyFcn = key_convert,
+      typename... ArgTs>
+  SimpleRetT insertInternal(LookupKeyT key, ArgTs&&... value);
 
-  SimpleRetT findInternal(const KeyT k) const;
+  template <
+      typename LookupKeyT = key_type,
+      typename LookupHashFcn = hasher,
+      typename LookupEqualFcn = key_equal>
+  SimpleRetT findInternal(const LookupKeyT k) const;
 
   SimpleRetT findAtInternal(uint32_t idx) const;
 
   std::atomic<SubMap*> subMaps_[kNumSubMaps_];
   std::atomic<uint32_t> numMapsAllocated_;
 
-  inline bool tryLockMap(int idx) {
+  inline bool tryLockMap(unsigned int idx) {
     SubMap* val = nullptr;
     return subMaps_[idx].compare_exchange_strong(val, (SubMap*)kLockedPtr_,
       std::memory_order_acquire);
@@ -412,8 +469,19 @@ class AtomicHashMap : boost::noncopyable {
 
 }; // AtomicHashMap
 
+template <
+    class KeyT,
+    class ValueT,
+    class HashFcn = std::hash<KeyT>,
+    class EqualFcn = std::equal_to<KeyT>,
+    class Allocator = std::allocator<char>>
+using QuadraticProbingAtomicHashMap =
+    AtomicHashMap<KeyT,
+                  ValueT,
+                  HashFcn,
+                  EqualFcn,
+                  Allocator,
+                  AtomicHashArrayQuadraticProbeFcn>;
 } // namespace folly
 
 #include <folly/AtomicHashMap-inl.h>
-
-#endif // FOLLY_ATOMICHASHMAP_H_

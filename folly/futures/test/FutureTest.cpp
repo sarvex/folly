@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,84 +14,81 @@
  * limitations under the License.
  */
 
+#include <folly/Baton.h>
+#include <folly/Executor.h>
+#include <folly/Memory.h>
+#include <folly/Unit.h>
+#include <folly/dynamic.h>
+#include <folly/futures/Future.h>
+#include <folly/portability/GTest.h>
+
 #include <algorithm>
 #include <atomic>
-#include <folly/small_vector.h>
-#include <gtest/gtest.h>
 #include <memory>
+#include <numeric>
 #include <string>
 #include <thread>
 #include <type_traits>
-#include <unistd.h>
-#include <folly/Memory.h>
-#include <folly/Executor.h>
-#include <folly/futures/Future.h>
-#include <folly/futures/ManualExecutor.h>
-#include <folly/futures/DrivableExecutor.h>
-#include <folly/MPMCQueue.h>
-
-#include <folly/io/async/EventBase.h>
-#include <folly/io/async/Request.h>
 
 using namespace folly;
-using std::pair;
-using std::string;
-using std::unique_ptr;
-using std::vector;
-using std::chrono::milliseconds;
 
 #define EXPECT_TYPE(x, T) \
   EXPECT_TRUE((std::is_same<decltype(x), T>::value))
 
-/// Simple executor that does work in another thread
-class ThreadExecutor : public Executor {
-  folly::MPMCQueue<Func> funcs;
-  std::atomic<bool> done {false};
-  std::thread worker;
-  folly::Baton<> baton;
-
-  void work() {
-    baton.post();
-    Func fn;
-    while (!done) {
-      while (!funcs.isEmpty()) {
-        funcs.blockingRead(fn);
-        fn();
-      }
-    }
-  }
-
- public:
-  explicit ThreadExecutor(size_t n = 1024)
-    : funcs(n), worker(std::bind(&ThreadExecutor::work, this)) {}
-
-  ~ThreadExecutor() {
-    done = true;
-    funcs.write([]{});
-    worker.join();
-  }
-
-  void add(Func fn) override {
-    funcs.blockingWrite(std::move(fn));
-  }
-
-  void waitForStartup() {
-    baton.wait();
-  }
-};
-
 typedef FutureException eggs_t;
 static eggs_t eggs("eggs");
 
-// Core
+// Future
 
-TEST(Future, coreSize) {
-  // If this number goes down, it's fine!
-  // If it goes up, please seek professional advice ;-)
-  EXPECT_EQ(128, sizeof(detail::Core<void>));
+TEST(Future, makeEmpty) {
+  auto f = Future<int>::makeEmpty();
+  EXPECT_THROW(f.isReady(), NoState);
 }
 
-// Future
+TEST(Future, futureDefaultCtor) {
+  Future<Unit>();
+}
+
+TEST(Future, futureToUnit) {
+  Future<Unit> fu = makeFuture(42).unit();
+  fu.value();
+  EXPECT_TRUE(makeFuture<int>(eggs).unit().hasException());
+}
+
+TEST(Future, voidFutureToUnit) {
+  Future<Unit> fu = makeFuture().unit();
+  fu.value();
+  EXPECT_TRUE(makeFuture<Unit>(eggs).unit().hasException());
+}
+
+TEST(Future, unitFutureToUnitIdentity) {
+  Future<Unit> fu = makeFuture(Unit{}).unit();
+  fu.value();
+  EXPECT_TRUE(makeFuture<Unit>(eggs).unit().hasException());
+}
+
+TEST(Future, toUnitWhileInProgress) {
+  Promise<int> p;
+  Future<Unit> fu = p.getFuture().unit();
+  EXPECT_FALSE(fu.isReady());
+  p.setValue(42);
+  EXPECT_TRUE(fu.isReady());
+}
+
+TEST(Future, makeFutureWithUnit) {
+  int count = 0;
+  Future<Unit> fu = makeFutureWith([&] { count++; });
+  EXPECT_EQ(1, count);
+}
+
+namespace {
+Future<int> onErrorHelperEggs(const eggs_t&) {
+  return makeFuture(10);
+}
+Future<int> onErrorHelperGeneric(const std::exception&) {
+  return makeFuture(20);
+}
+}
 
 TEST(Future, onError) {
   bool theFlag = false;
@@ -110,173 +107,266 @@ TEST(Future, onError) {
 
   // By reference
   {
-    auto f = makeFuture()
-      .then([] { throw eggs; })
-      .onError([&] (eggs_t& e) { flag(); });
+    auto f = makeFuture().then([] {
+      throw eggs;
+    }).onError([&](eggs_t& /* e */) { flag(); });
     EXPECT_FLAG();
     EXPECT_NO_THROW(f.value());
   }
 
   {
     auto f = makeFuture()
-      .then([] { throw eggs; })
-      .onError([&] (eggs_t& e) { flag(); return makeFuture(); });
+                 .then([] { throw eggs; })
+                 .onError([&](eggs_t& /* e */) {
+                   flag();
+                   return makeFuture();
+                 });
     EXPECT_FLAG();
     EXPECT_NO_THROW(f.value());
   }
 
   // By value
   {
-    auto f = makeFuture()
-      .then([] { throw eggs; })
-      .onError([&] (eggs_t e) { flag(); });
+    auto f = makeFuture().then([] {
+      throw eggs;
+    }).onError([&](eggs_t /* e */) { flag(); });
     EXPECT_FLAG();
     EXPECT_NO_THROW(f.value());
   }
 
   {
     auto f = makeFuture()
-      .then([] { throw eggs; })
-      .onError([&] (eggs_t e) { flag(); return makeFuture(); });
+                 .then([] { throw eggs; })
+                 .onError([&](eggs_t /* e */) {
+                   flag();
+                   return makeFuture();
+                 });
     EXPECT_FLAG();
     EXPECT_NO_THROW(f.value());
   }
 
   // Polymorphic
   {
-    auto f = makeFuture()
-      .then([] { throw eggs; })
-      .onError([&] (std::exception& e) { flag(); });
+    auto f = makeFuture().then([] {
+      throw eggs;
+    }).onError([&](std::exception& /* e */) { flag(); });
     EXPECT_FLAG();
     EXPECT_NO_THROW(f.value());
   }
 
   {
     auto f = makeFuture()
-      .then([] { throw eggs; })
-      .onError([&] (std::exception& e) { flag(); return makeFuture(); });
+                 .then([] { throw eggs; })
+                 .onError([&](std::exception& /* e */) {
+                   flag();
+                   return makeFuture();
+                 });
     EXPECT_FLAG();
     EXPECT_NO_THROW(f.value());
   }
 
   // Non-exceptions
   {
-    auto f = makeFuture()
-      .then([] { throw -1; })
-      .onError([&] (int e) { flag(); });
+    auto f = makeFuture().then([] {
+      throw - 1;
+    }).onError([&](int /* e */) { flag(); });
     EXPECT_FLAG();
     EXPECT_NO_THROW(f.value());
   }
 
   {
     auto f = makeFuture()
-      .then([] { throw -1; })
-      .onError([&] (int e) { flag(); return makeFuture(); });
+                 .then([] { throw - 1; })
+                 .onError([&](int /* e */) {
+                   flag();
+                   return makeFuture();
+                 });
     EXPECT_FLAG();
     EXPECT_NO_THROW(f.value());
   }
 
   // Mutable lambda
   {
-    auto f = makeFuture()
-      .then([] { throw eggs; })
-      .onError([&] (eggs_t& e) mutable { flag(); });
+    auto f = makeFuture().then([] {
+      throw eggs;
+    }).onError([&](eggs_t& /* e */) mutable { flag(); });
     EXPECT_FLAG();
     EXPECT_NO_THROW(f.value());
   }
 
   {
     auto f = makeFuture()
-      .then([] { throw eggs; })
-      .onError([&] (eggs_t& e) mutable { flag(); return makeFuture(); });
+                 .then([] { throw eggs; })
+                 .onError([&](eggs_t& /* e */) mutable {
+                   flag();
+                   return makeFuture();
+                 });
     EXPECT_FLAG();
     EXPECT_NO_THROW(f.value());
+  }
+
+  // Function pointer
+  {
+    auto f = makeFuture()
+                 .then([]() -> int { throw eggs; })
+                 .onError(onErrorHelperEggs)
+                 .onError(onErrorHelperGeneric);
+    EXPECT_EQ(10, f.value());
+  }
+  {
+    auto f = makeFuture()
+                 .then([]() -> int { throw std::runtime_error("test"); })
+                 .onError(onErrorHelperEggs)
+                 .onError(onErrorHelperGeneric);
+    EXPECT_EQ(20, f.value());
+  }
+  {
+    auto f = makeFuture()
+                 .then([]() -> int { throw std::runtime_error("test"); })
+                 .onError(onErrorHelperEggs);
+    EXPECT_THROW(f.value(), std::runtime_error);
   }
 
   // No throw
   {
     auto f = makeFuture()
-      .then([] { return 42; })
-      .onError([&] (eggs_t& e) { flag(); return -1; });
+                 .then([] { return 42; })
+                 .onError([&](eggs_t& /* e */) {
+                   flag();
+                   return -1;
+                 });
     EXPECT_NO_FLAG();
     EXPECT_EQ(42, f.value());
   }
 
   {
     auto f = makeFuture()
-      .then([] { return 42; })
-      .onError([&] (eggs_t& e) { flag(); return makeFuture<int>(-1); });
+                 .then([] { return 42; })
+                 .onError([&](eggs_t& /* e */) {
+                   flag();
+                   return makeFuture<int>(-1);
+                 });
     EXPECT_NO_FLAG();
     EXPECT_EQ(42, f.value());
   }
 
   // Catch different exception
   {
-    auto f = makeFuture()
-      .then([] { throw eggs; })
-      .onError([&] (std::runtime_error& e) { flag(); });
+    auto f = makeFuture().then([] {
+      throw eggs;
+    }).onError([&](std::runtime_error& /* e */) { flag(); });
     EXPECT_NO_FLAG();
     EXPECT_THROW(f.value(), eggs_t);
   }
 
   {
     auto f = makeFuture()
-      .then([] { throw eggs; })
-      .onError([&] (std::runtime_error& e) { flag(); return makeFuture(); });
+                 .then([] { throw eggs; })
+                 .onError([&](std::runtime_error& /* e */) {
+                   flag();
+                   return makeFuture();
+                 });
     EXPECT_NO_FLAG();
     EXPECT_THROW(f.value(), eggs_t);
   }
 
   // Returned value propagates
   {
-    auto f = makeFuture()
-      .then([] { throw eggs; return 0; })
-      .onError([&] (eggs_t& e) { return 42; });
+    auto f = makeFuture().then([]() -> int {
+      throw eggs;
+    }).onError([&](eggs_t& /* e */) { return 42; });
     EXPECT_EQ(42, f.value());
   }
 
   // Returned future propagates
   {
-    auto f = makeFuture()
-      .then([] { throw eggs; return 0; })
-      .onError([&] (eggs_t& e) { return makeFuture<int>(42); });
+    auto f = makeFuture().then([]() -> int {
+      throw eggs;
+    }).onError([&](eggs_t& /* e */) { return makeFuture<int>(42); });
     EXPECT_EQ(42, f.value());
   }
 
   // Throw in callback
   {
     auto f = makeFuture()
-      .then([] { throw eggs; return 0; })
-      .onError([&] (eggs_t& e) { throw e; return -1; });
+      .then([]() -> int { throw eggs; })
+      .onError([&] (eggs_t& e) -> int { throw e; });
     EXPECT_THROW(f.value(), eggs_t);
   }
 
   {
     auto f = makeFuture()
-      .then([] { throw eggs; return 0; })
-      .onError([&] (eggs_t& e) { throw e; return makeFuture<int>(-1); });
+      .then([]() -> int { throw eggs; })
+      .onError([&] (eggs_t& e) -> Future<int> { throw e; });
     EXPECT_THROW(f.value(), eggs_t);
   }
-}
 
-TEST(Future, try) {
-  class A {
-   public:
-    A(int x) : x_(x) {}
+  // exception_wrapper, return Future<T>
+  {
+    auto f = makeFuture()
+                 .then([] { throw eggs; })
+                 .onError([&](exception_wrapper /* e */) {
+                   flag();
+                   return makeFuture();
+                 });
+    EXPECT_FLAG();
+    EXPECT_NO_THROW(f.value());
+  }
 
-    int x() const {
-      return x_;
-    }
-   private:
-    int x_;
-  };
+  // exception_wrapper, return Future<T> but throw
+  {
+    auto f = makeFuture()
+                 .then([]() -> int {
+                   throw eggs;
+                 })
+                 .onError([&](exception_wrapper /* e */) -> Future<int> {
+                   flag();
+                   throw eggs;
+                 });
+    EXPECT_FLAG();
+    EXPECT_THROW(f.value(), eggs_t);
+  }
 
-  A a(5);
-  Try<A> t_a(std::move(a));
+  // exception_wrapper, return T
+  {
+    auto f = makeFuture()
+                 .then([]() -> int {
+                   throw eggs;
+                 })
+                 .onError([&](exception_wrapper /* e */) {
+                   flag();
+                   return -1;
+                 });
+    EXPECT_FLAG();
+    EXPECT_EQ(-1, f.value());
+  }
 
-  Try<void> t_void;
+  // exception_wrapper, return T but throw
+  {
+    auto f = makeFuture()
+                 .then([]() -> int {
+                   throw eggs;
+                 })
+                 .onError([&](exception_wrapper /* e */) -> int {
+                   flag();
+                   throw eggs;
+                 });
+    EXPECT_FLAG();
+    EXPECT_THROW(f.value(), eggs_t);
+  }
 
-  EXPECT_EQ(5, t_a.value().x());
+  // const exception_wrapper&
+  {
+    auto f = makeFuture()
+                 .then([] { throw eggs; })
+                 .onError([&](const exception_wrapper& /* e */) {
+                   flag();
+                   return makeFuture();
+                 });
+    EXPECT_FLAG();
+    EXPECT_NO_THROW(f.value());
+  }
+
 }
 
 TEST(Future, special) {
@@ -287,20 +377,33 @@ TEST(Future, special) {
 }
 
 TEST(Future, then) {
-  auto f = makeFuture<string>("0")
-    .then([](){ return makeFuture<string>("1"); })
-    .then([](Try<string>&& t) { return makeFuture(t.value() + ";2"); })
-    .then([](const Try<string>&& t) { return makeFuture(t.value() + ";3"); })
-    .then([](Try<string>& t) { return makeFuture(t.value() + ";4"); })
-    .then([](const Try<string>& t) { return makeFuture(t.value() + ";5"); })
-    .then([](Try<string> t) { return makeFuture(t.value() + ";6"); })
-    .then([](const Try<string> t) { return makeFuture(t.value() + ";7"); })
-    .then([](string&& s) { return makeFuture(s + ";8"); })
-    .then([](const string&& s) { return makeFuture(s + ";9"); })
-    .then([](string& s) { return makeFuture(s + ";10"); })
-    .then([](const string& s) { return makeFuture(s + ";11"); })
-    .then([](string s) { return makeFuture(s + ";12"); })
-    .then([](const string s) { return makeFuture(s + ";13"); })
+  auto f = makeFuture<std::string>("0")
+    .then([](){
+      return makeFuture<std::string>("1"); })
+    .then([](Try<std::string>&& t) {
+      return makeFuture(t.value() + ";2"); })
+    .then([](const Try<std::string>&& t) {
+      return makeFuture(t.value() + ";3"); })
+    .then([](Try<std::string>& t) {
+      return makeFuture(t.value() + ";4"); })
+    .then([](const Try<std::string>& t) {
+      return makeFuture(t.value() + ";5"); })
+    .then([](Try<std::string> t) {
+      return makeFuture(t.value() + ";6"); })
+    .then([](const Try<std::string> t) {
+      return makeFuture(t.value() + ";7"); })
+    .then([](std::string&& s) {
+      return makeFuture(s + ";8"); })
+    .then([](const std::string&& s) {
+      return makeFuture(s + ";9"); })
+    .then([](std::string& s) {
+      return makeFuture(s + ";10"); })
+    .then([](const std::string& s) {
+      return makeFuture(s + ";11"); })
+    .then([](std::string s) {
+      return makeFuture(s + ";12"); })
+    .then([](const std::string s) {
+      return makeFuture(s + ";13"); })
   ;
   EXPECT_EQ(f.value(), "1;2;3;4;5;6;7;8;9;10;11;12;13");
 }
@@ -319,11 +422,11 @@ TEST(Future, thenTry) {
     .then([&](Try<int>&& t) { flag = true; EXPECT_EQ(42, t.value()); });
   EXPECT_TRUE(flag); flag = false;
 
-  makeFuture().then([&](Try<void>&& t) { flag = true; t.value(); });
+  makeFuture().then([&](Try<Unit>&& t) { flag = true; t.value(); });
   EXPECT_TRUE(flag); flag = false;
 
-  Promise<void> p;
-  auto f = p.getFuture().then([&](Try<void>&& t) { flag = true; });
+  Promise<Unit> p;
+  auto f = p.getFuture().then([&](Try<Unit>&& /* t */) { flag = true; });
   EXPECT_FALSE(flag);
   EXPECT_FALSE(f.isReady());
   p.setValue();
@@ -349,10 +452,10 @@ TEST(Future, thenValue) {
   });
   EXPECT_TRUE(flag); flag = false;
 
-  auto f = makeFuture<int>(eggs).then([&](int i){});
+  auto f = makeFuture<int>(eggs).then([&](int /* i */) {});
   EXPECT_THROW(f.value(), eggs_t);
 
-  f = makeFuture<void>(eggs).then([&]{});
+  f = makeFuture<Unit>(eggs).then([&]{});
   EXPECT_THROW(f.value(), eggs_t);
 }
 
@@ -363,27 +466,27 @@ TEST(Future, thenValueFuture) {
     .then([&](Try<int>&& t) { flag = true; EXPECT_EQ(42, t.value()); });
   EXPECT_TRUE(flag); flag = false;
 
-  makeFuture()
-    .then([]{ return makeFuture(); })
-    .then([&](Try<void>&& t) { flag = true; });
+  makeFuture().then([] {
+    return makeFuture();
+  }).then([&](Try<Unit>&& /* t */) { flag = true; });
   EXPECT_TRUE(flag); flag = false;
 }
 
-static string doWorkStatic(Try<string>&& t) {
+static std::string doWorkStatic(Try<std::string>&& t) {
   return t.value() + ";static";
 }
 
 TEST(Future, thenFunction) {
   struct Worker {
-    string doWork(Try<string>&& t) {
+    std::string doWork(Try<std::string>&& t) {
       return t.value() + ";class";
     }
-    static string doWorkStatic(Try<string>&& t) {
+    static std::string doWorkStatic(Try<std::string>&& t) {
       return t.value() + ";class-static";
     }
   } w;
 
-  auto f = makeFuture<string>("start")
+  auto f = makeFuture<std::string>("start")
     .then(doWorkStatic)
     .then(Worker::doWorkStatic)
     .then(&Worker::doWork, &w);
@@ -391,26 +494,51 @@ TEST(Future, thenFunction) {
   EXPECT_EQ(f.value(), "start;static;class-static;class");
 }
 
-static Future<string> doWorkStaticFuture(Try<string>&& t) {
+static Future<std::string> doWorkStaticFuture(Try<std::string>&& t) {
   return makeFuture(t.value() + ";static");
 }
 
 TEST(Future, thenFunctionFuture) {
   struct Worker {
-    Future<string> doWorkFuture(Try<string>&& t) {
+    Future<std::string> doWorkFuture(Try<std::string>&& t) {
       return makeFuture(t.value() + ";class");
     }
-    static Future<string> doWorkStaticFuture(Try<string>&& t) {
+    static Future<std::string> doWorkStaticFuture(Try<std::string>&& t) {
       return makeFuture(t.value() + ";class-static");
     }
   } w;
 
-  auto f = makeFuture<string>("start")
+  auto f = makeFuture<std::string>("start")
     .then(doWorkStaticFuture)
     .then(Worker::doWorkStaticFuture)
     .then(&Worker::doWorkFuture, &w);
 
   EXPECT_EQ(f.value(), "start;static;class-static;class");
+}
+
+TEST(Future, thenStdFunction) {
+  {
+    std::function<int()> fn = [](){ return 42; };
+    auto f = makeFuture().then(std::move(fn));
+    EXPECT_EQ(f.value(), 42);
+  }
+  {
+    std::function<int(int)> fn = [](int i){ return i + 23; };
+    auto f = makeFuture(19).then(std::move(fn));
+    EXPECT_EQ(f.value(), 42);
+  }
+  {
+    std::function<int(Try<int>&)> fn = [](Try<int>& t){ return t.value() + 2; };
+    auto f = makeFuture(1).then(std::move(fn));
+    EXPECT_EQ(f.value(), 3);
+  }
+  {
+    bool flag = false;
+    std::function<void()> fn = [&flag](){ flag = true; };
+    auto f = makeFuture().then(std::move(fn));
+    EXPECT_TRUE(f.isReady());
+    EXPECT_TRUE(flag);
+  }
 }
 
 TEST(Future, thenBind) {
@@ -423,17 +551,17 @@ TEST(Future, thenBind) {
 }
 
 TEST(Future, thenBindTry) {
-  auto l = [](Try<string>&& t) {
+  auto l = [](Try<std::string>&& t) {
     return makeFuture(t.value() + ";bind");
   };
   auto b = std::bind(l, std::placeholders::_1);
-  auto f = makeFuture<string>("start").then(std::move(b));
+  auto f = makeFuture<std::string>("start").then(std::move(b));
 
   EXPECT_EQ(f.value(), "start;bind");
 }
 
 TEST(Future, value) {
-  auto f = makeFuture(unique_ptr<int>(new int(42)));
+  auto f = makeFuture(std::unique_ptr<int>(new int(42)));
   auto up = std::move(f.value());
   EXPECT_EQ(42, *up);
 
@@ -472,120 +600,76 @@ TEST(Future, makeFuture) {
   EXPECT_EQ(42, makeFuture<float>(42).value());
 
   auto fun = [] { return 42; };
-  EXPECT_TYPE(makeFutureTry(fun), Future<int>);
-  EXPECT_EQ(42, makeFutureTry(fun).value());
+  EXPECT_TYPE(makeFutureWith(fun), Future<int>);
+  EXPECT_EQ(42, makeFutureWith(fun).value());
+
+  auto funf = [] { return makeFuture<int>(43); };
+  EXPECT_TYPE(makeFutureWith(funf), Future<int>);
+  EXPECT_EQ(43, makeFutureWith(funf).value());
 
   auto failfun = []() -> int { throw eggs; };
-  EXPECT_TYPE(makeFutureTry(failfun), Future<int>);
-  EXPECT_THROW(makeFutureTry(failfun).value(), eggs_t);
+  EXPECT_TYPE(makeFutureWith(failfun), Future<int>);
+  EXPECT_NO_THROW(makeFutureWith(failfun));
+  EXPECT_THROW(makeFutureWith(failfun).value(), eggs_t);
 
-  EXPECT_TYPE(makeFuture(), Future<void>);
-}
+  auto failfunf = []() -> Future<int> { throw eggs; };
+  EXPECT_TYPE(makeFutureWith(failfunf), Future<int>);
+  EXPECT_NO_THROW(makeFutureWith(failfunf));
+  EXPECT_THROW(makeFutureWith(failfunf).value(), eggs_t);
 
-// Promise
-
-TEST(Promise, special) {
-  EXPECT_FALSE(std::is_copy_constructible<Promise<int>>::value);
-  EXPECT_FALSE(std::is_copy_assignable<Promise<int>>::value);
-  EXPECT_TRUE(std::is_move_constructible<Promise<int>>::value);
-  EXPECT_TRUE(std::is_move_assignable<Promise<int>>::value);
-}
-
-TEST(Promise, getFuture) {
-  Promise<int> p;
-  Future<int> f = p.getFuture();
-  EXPECT_FALSE(f.isReady());
-}
-
-TEST(Promise, setValue) {
-  Promise<int> fund;
-  auto ffund = fund.getFuture();
-  fund.setValue(42);
-  EXPECT_EQ(42, ffund.value());
-
-  struct Foo {
-    string name;
-    int value;
-  };
-
-  Promise<Foo> pod;
-  auto fpod = pod.getFuture();
-  Foo f = {"the answer", 42};
-  pod.setValue(f);
-  Foo f2 = fpod.value();
-  EXPECT_EQ(f.name, f2.name);
-  EXPECT_EQ(f.value, f2.value);
-
-  pod = Promise<Foo>();
-  fpod = pod.getFuture();
-  pod.setValue(std::move(f2));
-  Foo f3 = fpod.value();
-  EXPECT_EQ(f.name, f3.name);
-  EXPECT_EQ(f.value, f3.value);
-
-  Promise<unique_ptr<int>> mov;
-  auto fmov = mov.getFuture();
-  mov.setValue(unique_ptr<int>(new int(42)));
-  unique_ptr<int> ptr = std::move(fmov.value());
-  EXPECT_EQ(42, *ptr);
-
-  Promise<void> v;
-  auto fv = v.getFuture();
-  v.setValue();
-  EXPECT_TRUE(fv.isReady());
-}
-
-TEST(Promise, setException) {
-  {
-    Promise<void> p;
-    auto f = p.getFuture();
-    p.setException(eggs);
-    EXPECT_THROW(f.value(), eggs_t);
-  }
-  {
-    Promise<void> p;
-    auto f = p.getFuture();
-    try {
-      throw eggs;
-    } catch (...) {
-      p.setException(exception_wrapper(std::current_exception()));
-    }
-    EXPECT_THROW(f.value(), eggs_t);
-  }
-}
-
-TEST(Promise, fulfil) {
-  {
-    Promise<int> p;
-    auto f = p.getFuture();
-    p.fulfil([] { return 42; });
-    EXPECT_EQ(42, f.value());
-  }
-  {
-    Promise<int> p;
-    auto f = p.getFuture();
-    p.fulfil([]() -> int { throw eggs; });
-    EXPECT_THROW(f.value(), eggs_t);
-  }
+  EXPECT_TYPE(makeFuture(), Future<Unit>);
 }
 
 TEST(Future, finish) {
   auto x = std::make_shared<int>(0);
-  {
-    Promise<int> p;
-    auto f = p.getFuture().then([x](Try<int>&& t) { *x = t.value(); });
 
-    // The callback hasn't executed
-    EXPECT_EQ(0, *x);
+  Promise<int> p;
+  auto f = p.getFuture().then([x](Try<int>&& t) { *x = t.value(); });
 
-    // The callback has a reference to x
-    EXPECT_EQ(2, x.use_count());
+  // The callback hasn't executed
+  EXPECT_EQ(0, *x);
 
-    p.setValue(42);
+  // The callback has a reference to x
+  EXPECT_EQ(2, x.use_count());
 
-    // the callback has executed
-    EXPECT_EQ(42, *x);
-  }
+  p.setValue(42);
+
+  // the callback has executed
+  EXPECT_EQ(42, *x);
+
+  // the callback has been destructed
+  // and has released its reference to x
+  EXPECT_EQ(1, x.use_count());
+}
+
+TEST(Future, finishBigLambda) {
+  auto x = std::make_shared<int>(0);
+
+  // bulk_data, to be captured in the lambda passed to Future::then.
+  // This is meant to force that the lambda can't be stored inside
+  // the Future object.
+  std::array<char, sizeof(futures::detail::Core<int>)> bulk_data = {{0}};
+
+  // suppress gcc warning about bulk_data not being used
+  EXPECT_EQ(bulk_data[0], 0);
+
+  Promise<int> p;
+  auto f = p.getFuture().then([x, bulk_data](Try<int>&& t) {
+    (void)bulk_data;
+    *x = t.value();
+  });
+
+  // The callback hasn't executed
+  EXPECT_EQ(0, *x);
+
+  // The callback has a reference to x
+  EXPECT_EQ(2, x.use_count());
+
+  p.setValue(42);
+
+  // the callback has executed
+  EXPECT_EQ(42, *x);
+
   // the callback has been destructed
   // and has released its reference to x
   EXPECT_EQ(1, x.use_count());
@@ -626,289 +710,21 @@ TEST(Future, unwrap) {
   EXPECT_EQ(7, f.value());
 }
 
-TEST(Future, whenAll) {
-  // returns a vector variant
-  {
-    vector<Promise<int>> promises(10);
-    vector<Future<int>> futures;
-
-    for (auto& p : promises)
-      futures.push_back(p.getFuture());
-
-    auto allf = whenAll(futures.begin(), futures.end());
-
-    random_shuffle(promises.begin(), promises.end());
-    for (auto& p : promises) {
-      EXPECT_FALSE(allf.isReady());
-      p.setValue(42);
-    }
-
-    EXPECT_TRUE(allf.isReady());
-    auto& results = allf.value();
-    for (auto& t : results) {
-      EXPECT_EQ(42, t.value());
-    }
-  }
-
-  // check error semantics
-  {
-    vector<Promise<int>> promises(4);
-    vector<Future<int>> futures;
-
-    for (auto& p : promises)
-      futures.push_back(p.getFuture());
-
-    auto allf = whenAll(futures.begin(), futures.end());
-
-
-    promises[0].setValue(42);
-    promises[1].setException(eggs);
-
-    EXPECT_FALSE(allf.isReady());
-
-    promises[2].setValue(42);
-
-    EXPECT_FALSE(allf.isReady());
-
-    promises[3].setException(eggs);
-
-    EXPECT_TRUE(allf.isReady());
-    EXPECT_FALSE(allf.getTry().hasException());
-
-    auto& results = allf.value();
-    EXPECT_EQ(42, results[0].value());
-    EXPECT_TRUE(results[1].hasException());
-    EXPECT_EQ(42, results[2].value());
-    EXPECT_TRUE(results[3].hasException());
-  }
-
-  // check that futures are ready in then()
-  {
-    vector<Promise<void>> promises(10);
-    vector<Future<void>> futures;
-
-    for (auto& p : promises)
-      futures.push_back(p.getFuture());
-
-    auto allf = whenAll(futures.begin(), futures.end())
-      .then([](Try<vector<Try<void>>>&& ts) {
-        for (auto& f : ts.value())
-          f.value();
-      });
-
-    random_shuffle(promises.begin(), promises.end());
-    for (auto& p : promises)
-      p.setValue();
-    EXPECT_TRUE(allf.isReady());
-  }
-}
-
-
-TEST(Future, whenAny) {
-  {
-    vector<Promise<int>> promises(10);
-    vector<Future<int>> futures;
-
-    for (auto& p : promises)
-      futures.push_back(p.getFuture());
-
-    for (auto& f : futures) {
-      EXPECT_FALSE(f.isReady());
-    }
-
-    auto anyf = whenAny(futures.begin(), futures.end());
-
-    /* futures were moved in, so these are invalid now */
-    EXPECT_FALSE(anyf.isReady());
-
-    promises[7].setValue(42);
-    EXPECT_TRUE(anyf.isReady());
-    auto& idx_fut = anyf.value();
-
-    auto i = idx_fut.first;
-    EXPECT_EQ(7, i);
-
-    auto& f = idx_fut.second;
-    EXPECT_EQ(42, f.value());
-  }
-
-  // error
-  {
-    vector<Promise<void>> promises(10);
-    vector<Future<void>> futures;
-
-    for (auto& p : promises)
-      futures.push_back(p.getFuture());
-
-    for (auto& f : futures) {
-      EXPECT_FALSE(f.isReady());
-    }
-
-    auto anyf = whenAny(futures.begin(), futures.end());
-
-    EXPECT_FALSE(anyf.isReady());
-
-    promises[3].setException(eggs);
-    EXPECT_TRUE(anyf.isReady());
-    EXPECT_TRUE(anyf.value().second.hasException());
-  }
-
-  // then()
-  {
-    vector<Promise<int>> promises(10);
-    vector<Future<int>> futures;
-
-    for (auto& p : promises)
-      futures.push_back(p.getFuture());
-
-    auto anyf = whenAny(futures.begin(), futures.end())
-      .then([](pair<size_t, Try<int>> p) {
-        EXPECT_EQ(42, p.second.value());
-      });
-
-    promises[3].setValue(42);
-    EXPECT_TRUE(anyf.isReady());
-  }
-}
-
-
-TEST(when, already_completed) {
-  {
-    vector<Future<void>> fs;
-    for (int i = 0; i < 10; i++)
-      fs.push_back(makeFuture());
-
-    whenAll(fs.begin(), fs.end())
-      .then([&](vector<Try<void>> ts) {
-        EXPECT_EQ(fs.size(), ts.size());
-      });
-  }
-  {
-    vector<Future<int>> fs;
-    for (int i = 0; i < 10; i++)
-      fs.push_back(makeFuture(i));
-
-    whenAny(fs.begin(), fs.end())
-      .then([&](pair<size_t, Try<int>> p) {
-        EXPECT_EQ(p.first, p.second.value());
-      });
-  }
-}
-
-TEST(when, whenN) {
-  vector<Promise<void>> promises(10);
-  vector<Future<void>> futures;
-
-  for (auto& p : promises)
-    futures.push_back(p.getFuture());
-
-  bool flag = false;
-  size_t n = 3;
-  whenN(futures.begin(), futures.end(), n)
-    .then([&](vector<pair<size_t, Try<void>>> v) {
-      flag = true;
-      EXPECT_EQ(n, v.size());
-      for (auto& tt : v)
-        EXPECT_TRUE(tt.second.hasValue());
-    });
-
-  promises[0].setValue();
-  EXPECT_FALSE(flag);
-  promises[1].setValue();
-  EXPECT_FALSE(flag);
-  promises[2].setValue();
-  EXPECT_TRUE(flag);
-}
-
-/* Ensure that we can compile when_{all,any} with folly::small_vector */
-TEST(when, small_vector) {
-
-  static_assert(!FOLLY_IS_TRIVIALLY_COPYABLE(Future<void>),
-                "Futures should not be trivially copyable");
-  static_assert(!FOLLY_IS_TRIVIALLY_COPYABLE(Future<int>),
-                "Futures should not be trivially copyable");
-
-  using folly::small_vector;
-  {
-    small_vector<Future<void>> futures;
-
-    for (int i = 0; i < 10; i++)
-      futures.push_back(makeFuture());
-
-    auto anyf = whenAny(futures.begin(), futures.end());
-  }
-
-  {
-    small_vector<Future<void>> futures;
-
-    for (int i = 0; i < 10; i++)
-      futures.push_back(makeFuture());
-
-    auto allf = whenAll(futures.begin(), futures.end());
-  }
-}
-
-TEST(Future, whenAllVariadic) {
-  Promise<bool> pb;
-  Promise<int> pi;
-  Future<bool> fb = pb.getFuture();
-  Future<int> fi = pi.getFuture();
-  bool flag = false;
-  whenAll(std::move(fb), std::move(fi))
-    .then([&](std::tuple<Try<bool>, Try<int>> tup) {
-      flag = true;
-      EXPECT_TRUE(std::get<0>(tup).hasValue());
-      EXPECT_EQ(std::get<0>(tup).value(), true);
-      EXPECT_TRUE(std::get<1>(tup).hasValue());
-      EXPECT_EQ(std::get<1>(tup).value(), 42);
-    });
-  pb.setValue(true);
-  EXPECT_FALSE(flag);
-  pi.setValue(42);
-  EXPECT_TRUE(flag);
-}
-
-TEST(Future, whenAllVariadicReferences) {
-  Promise<bool> pb;
-  Promise<int> pi;
-  Future<bool> fb = pb.getFuture();
-  Future<int> fi = pi.getFuture();
-  bool flag = false;
-  whenAll(fb, fi)
-    .then([&](std::tuple<Try<bool>, Try<int>> tup) {
-      flag = true;
-      EXPECT_TRUE(std::get<0>(tup).hasValue());
-      EXPECT_EQ(std::get<0>(tup).value(), true);
-      EXPECT_TRUE(std::get<1>(tup).hasValue());
-      EXPECT_EQ(std::get<1>(tup).value(), 42);
-    });
-  pb.setValue(true);
-  EXPECT_FALSE(flag);
-  pi.setValue(42);
-  EXPECT_TRUE(flag);
-}
-
-TEST(Future, whenAll_none) {
-  vector<Future<int>> fs;
-  auto f = whenAll(fs.begin(), fs.end());
-  EXPECT_TRUE(f.isReady());
-}
-
 TEST(Future, throwCaughtInImmediateThen) {
   // Neither of these should throw "Promise already satisfied"
   makeFuture().then(
-    [=](Try<void>&&) -> int { throw std::exception(); });
+    [=](Try<Unit>&&) -> int { throw std::exception(); });
   makeFuture().then(
-    [=](Try<void>&&) -> Future<int> { throw std::exception(); });
+    [=](Try<Unit>&&) -> Future<int> { throw std::exception(); });
 }
 
 TEST(Future, throwIfFailed) {
-  makeFuture<void>(eggs)
-    .then([=](Try<void>&& t) {
+  makeFuture<Unit>(eggs)
+    .then([=](Try<Unit>&& t) {
       EXPECT_THROW(t.throwIfFailed(), eggs_t);
     });
   makeFuture()
-    .then([=](Try<void>&& t) {
+    .then([=](Try<Unit>&& t) {
       EXPECT_NO_THROW(t.throwIfFailed());
     });
 
@@ -922,262 +738,15 @@ TEST(Future, throwIfFailed) {
     });
 }
 
-TEST(Future, waitImmediate) {
-  makeFuture().wait();
-  auto done = makeFuture(42).wait().value();
-  EXPECT_EQ(42, done);
-
-  vector<int> v{1,2,3};
-  auto done_v = makeFuture(v).wait().value();
-  EXPECT_EQ(v.size(), done_v.size());
-  EXPECT_EQ(v, done_v);
-
-  vector<Future<void>> v_f;
-  v_f.push_back(makeFuture());
-  v_f.push_back(makeFuture());
-  auto done_v_f = whenAll(v_f.begin(), v_f.end()).wait().value();
-  EXPECT_EQ(2, done_v_f.size());
-
-  vector<Future<bool>> v_fb;
-  v_fb.push_back(makeFuture(true));
-  v_fb.push_back(makeFuture(false));
-  auto fut = whenAll(v_fb.begin(), v_fb.end());
-  auto done_v_fb = std::move(fut.wait().value());
-  EXPECT_EQ(2, done_v_fb.size());
-}
-
-TEST(Future, wait) {
-  Promise<int> p;
-  Future<int> f = p.getFuture();
-  std::atomic<bool> flag{false};
-  std::atomic<int> result{1};
-  std::atomic<std::thread::id> id;
-
-  std::thread t([&](Future<int>&& tf){
-      auto n = tf.then([&](Try<int> && t) {
-          id = std::this_thread::get_id();
-          return t.value();
-        });
-      flag = true;
-      result.store(n.wait().value());
-    },
-    std::move(f)
-    );
-  while(!flag){}
-  EXPECT_EQ(result.load(), 1);
-  p.setValue(42);
-  t.join();
-  // validate that the callback ended up executing in this thread, which
-  // is more to ensure that this test actually tests what it should
-  EXPECT_EQ(id, std::this_thread::get_id());
-  EXPECT_EQ(result.load(), 42);
-}
-
-struct MoveFlag {
-  MoveFlag() = default;
-  MoveFlag(const MoveFlag&) = delete;
-  MoveFlag(MoveFlag&& other) noexcept {
-    other.moved = true;
-  }
-  bool moved{false};
-};
-
-TEST(Future, waitReplacesSelf) {
-  // wait
-  {
-    // lvalue
-    auto f1 = makeFuture(MoveFlag());
-    f1.wait();
-    EXPECT_FALSE(f1.value().moved);
-
-    // rvalue
-    auto f2 = makeFuture(MoveFlag()).wait();
-    EXPECT_FALSE(f2.value().moved);
-  }
-
-  // wait(Duration)
-  {
-    // lvalue
-    auto f1 = makeFuture(MoveFlag());
-    f1.wait(milliseconds(1));
-    EXPECT_FALSE(f1.value().moved);
-
-    // rvalue
-    auto f2 = makeFuture(MoveFlag()).wait(milliseconds(1));
-    EXPECT_FALSE(f2.value().moved);
-  }
-
-  // waitVia
-  {
-    folly::EventBase eb;
-    // lvalue
-    auto f1 = makeFuture(MoveFlag());
-    f1.waitVia(&eb);
-    EXPECT_FALSE(f1.value().moved);
-
-    // rvalue
-    auto f2 = makeFuture(MoveFlag()).waitVia(&eb);
-    EXPECT_FALSE(f2.value().moved);
-  }
-}
-
-TEST(Future, waitWithDuration) {
- {
-  Promise<int> p;
-  Future<int> f = p.getFuture();
-  f.wait(milliseconds(1));
-  EXPECT_FALSE(f.isReady());
-  p.setValue(1);
-  EXPECT_TRUE(f.isReady());
- }
- {
-  Promise<int> p;
-  Future<int> f = p.getFuture();
-  p.setValue(1);
-  f.wait(milliseconds(1));
-  EXPECT_TRUE(f.isReady());
- }
- {
-  vector<Future<bool>> v_fb;
-  v_fb.push_back(makeFuture(true));
-  v_fb.push_back(makeFuture(false));
-  auto f = whenAll(v_fb.begin(), v_fb.end());
-  f.wait(milliseconds(1));
-  EXPECT_TRUE(f.isReady());
-  EXPECT_EQ(2, f.value().size());
- }
- {
-  vector<Future<bool>> v_fb;
-  Promise<bool> p1;
-  Promise<bool> p2;
-  v_fb.push_back(p1.getFuture());
-  v_fb.push_back(p2.getFuture());
-  auto f = whenAll(v_fb.begin(), v_fb.end());
-  f.wait(milliseconds(1));
-  EXPECT_FALSE(f.isReady());
-  p1.setValue(true);
-  EXPECT_FALSE(f.isReady());
-  p2.setValue(true);
-  EXPECT_TRUE(f.isReady());
- }
- {
-  auto f = makeFuture().wait(milliseconds(1));
-  EXPECT_TRUE(f.isReady());
- }
-
- {
-   Promise<void> p;
-   auto start = std::chrono::steady_clock::now();
-   auto f = p.getFuture().wait(milliseconds(100));
-   auto elapsed = std::chrono::steady_clock::now() - start;
-   EXPECT_GE(elapsed, milliseconds(100));
-   EXPECT_FALSE(f.isReady());
-   p.setValue();
-   EXPECT_TRUE(f.isReady());
- }
-
- {
-   // Try to trigger the race where the resultant Future is not yet complete
-   // even if we didn't hit the timeout, and make sure we deal with it properly
-   Promise<void> p;
-   folly::Baton<> b;
-   auto t = std::thread([&]{
-     b.post();
-     /* sleep override */ std::this_thread::sleep_for(milliseconds(100));
-     p.setValue();
-   });
-   b.wait();
-   auto f = p.getFuture().wait(std::chrono::seconds(3600));
-   EXPECT_TRUE(f.isReady());
-   t.join();
- }
-}
-
-class DummyDrivableExecutor : public DrivableExecutor {
- public:
-  void add(Func f) override {}
-  void drive() override { ran = true; }
-  bool ran{false};
-};
-
-TEST(Future, getVia) {
-  {
-    // non-void
-    ManualExecutor x;
-    auto f = via(&x).then([]{ return true; });
-    EXPECT_TRUE(f.getVia(&x));
-  }
-
-  {
-    // void
-    ManualExecutor x;
-    auto f = via(&x).then();
-    f.getVia(&x);
-  }
-
-  {
-    DummyDrivableExecutor x;
-    auto f = makeFuture(true);
-    EXPECT_TRUE(f.getVia(&x));
-    EXPECT_FALSE(x.ran);
-  }
-}
-
-TEST(Future, waitVia) {
-  {
-    ManualExecutor x;
-    auto f = via(&x).then();
-    EXPECT_FALSE(f.isReady());
-    f.waitVia(&x);
-    EXPECT_TRUE(f.isReady());
-  }
-
-  {
-    // try rvalue as well
-    ManualExecutor x;
-    auto f = via(&x).then().waitVia(&x);
-    EXPECT_TRUE(f.isReady());
-  }
-
-  {
-    DummyDrivableExecutor x;
-    makeFuture(true).waitVia(&x);
-    EXPECT_FALSE(x.ran);
-  }
-}
-
-TEST(Future, viaRaces) {
-  ManualExecutor x;
-  Promise<void> p;
-  auto tid = std::this_thread::get_id();
-  bool done = false;
-
-  std::thread t1([&] {
-    p.getFuture()
-      .via(&x)
-      .then([&](Try<void>&&) { EXPECT_EQ(tid, std::this_thread::get_id()); })
-      .then([&](Try<void>&&) { EXPECT_EQ(tid, std::this_thread::get_id()); })
-      .then([&](Try<void>&&) { done = true; });
-  });
-
-  std::thread t2([&] {
-    p.setValue();
-  });
-
-  while (!done) x.run();
-  t1.join();
-  t2.join();
-}
-
-TEST(Future, getFuture_after_setValue) {
+TEST(Future, getFutureAfterSetValue) {
   Promise<int> p;
   p.setValue(42);
   EXPECT_EQ(42, p.getFuture().value());
 }
 
-TEST(Future, getFuture_after_setException) {
-  Promise<void> p;
-  p.fulfil([]() -> void { throw std::logic_error("foo"); });
+TEST(Future, getFutureAfterSetException) {
+  Promise<Unit> p;
+  p.setWith([]() -> void { throw std::logic_error("foo"); });
   EXPECT_THROW(p.getFuture().value(), std::logic_error);
 }
 
@@ -1192,8 +761,8 @@ TEST(Future, detachRace) {
   // slow test so I won't do that but if it ever fails, take it seriously, and
   // run the test binary with "--gtest_repeat=10000 --gtest_filter=*detachRace"
   // (Don't forget to enable ASAN)
-  auto p = folly::make_unique<Promise<bool>>();
-  auto f = folly::make_unique<Future<bool>>(p->getFuture());
+  auto p = std::make_unique<Promise<bool>>();
+  auto f = std::make_unique<Future<bool>>(p->getFuture());
   folly::Baton<> baton;
   std::thread t1([&]{
     baton.post();
@@ -1204,72 +773,6 @@ TEST(Future, detachRace) {
   t1.join();
 }
 
-class TestData : public RequestData {
- public:
-  explicit TestData(int data) : data_(data) {}
-  virtual ~TestData() {}
-  int data_;
-};
-
-TEST(Future, context) {
-
-  // Start a new context
-  RequestContext::create();
-
-  EXPECT_EQ(nullptr, RequestContext::get()->getContextData("test"));
-
-  // Set some test data
-  RequestContext::get()->setContextData(
-    "test",
-    std::unique_ptr<TestData>(new TestData(10)));
-
-  // Start a future
-  Promise<void> p;
-  auto future = p.getFuture().then([&]{
-    // Check that the context followed the future
-    EXPECT_TRUE(RequestContext::get() != nullptr);
-    auto a = dynamic_cast<TestData*>(
-      RequestContext::get()->getContextData("test"));
-    auto data = a->data_;
-    EXPECT_EQ(10, data);
-  });
-
-  // Clear the context
-  RequestContext::setContext(nullptr);
-
-  EXPECT_EQ(nullptr, RequestContext::get()->getContextData("test"));
-
-  // Fulfil the promise
-  p.setValue();
-}
-
-
-// This only fails about 1 in 1k times when the bug is present :(
-TEST(Future, t5506504) {
-  ThreadExecutor x;
-
-  auto fn = [&x]{
-    auto promises = std::make_shared<vector<Promise<void>>>(4);
-    vector<Future<void>> futures;
-
-    for (auto& p : *promises) {
-      futures.emplace_back(
-        p.getFuture()
-        .via(&x)
-        .then([](Try<void>&&){}));
-    }
-
-    x.waitForStartup();
-    x.add([promises]{
-      for (auto& p : *promises) p.setValue();
-    });
-
-    return whenAll(futures.begin(), futures.end());
-  };
-
-  fn().wait();
-}
-
 // Test of handling of a circular dependency. It's never recommended
 // to have one because of possible memory leaks. Here we test that
 // we can handle freeing of the Future while it is running.
@@ -1277,27 +780,25 @@ TEST(Future, CircularDependencySharedPtrSelfReset) {
   Promise<int64_t> promise;
   auto ptr = std::make_shared<Future<int64_t>>(promise.getFuture());
 
-  ptr->then(
-    [ptr] (folly::Try<int64_t>&& uid) mutable {
-      EXPECT_EQ(1, ptr.use_count());
+  ptr->then([ptr](folly::Try<int64_t>&& /* uid */) mutable {
+    EXPECT_EQ(1, ptr.use_count());
 
-      // Leaving no references to ourselves.
-      ptr.reset();
-      EXPECT_EQ(0, ptr.use_count());
-    }
-  );
+    // Leaving no references to ourselves.
+    ptr.reset();
+    EXPECT_EQ(0, ptr.use_count());
+  });
 
   EXPECT_EQ(2, ptr.use_count());
 
   ptr.reset();
 
-  promise.fulfil([]{return 1l;});
+  promise.setValue(1);
 }
 
 TEST(Future, Constructor) {
   auto f1 = []() -> Future<int> { return Future<int>(3); }();
   EXPECT_EQ(f1.value(), 3);
-  auto f2 = []() -> Future<void> { return Future<void>(); }();
+  auto f2 = []() -> Future<Unit> { return Future<Unit>(); }();
   EXPECT_NO_THROW(f2.value());
 }
 
@@ -1306,139 +807,164 @@ TEST(Future, ImplicitConstructor) {
   EXPECT_EQ(f1.value(), 3);
   // Unfortunately, the C++ standard does not allow the
   // following implicit conversion to work:
-  //auto f2 = []() -> Future<void> { }();
+  //auto f2 = []() -> Future<Unit> { }();
 }
 
-TEST(Future, via_then_get_was_racy) {
-  ThreadExecutor x;
-  std::unique_ptr<int> val = folly::via(&x)
-    .then([] { return folly::make_unique<int>(42); })
-    .get();
-  ASSERT_TRUE(!!val);
-  EXPECT_EQ(42, *val);
+TEST(Future, InPlaceConstructor) {
+  auto f = Future<std::pair<int, double>>(in_place, 5, 3.2);
+  EXPECT_EQ(5, f.value().first);
 }
 
-TEST(Future, ensure) {
-  size_t count = 0;
-  auto cob = [&]{ count++; };
-  auto f = makeFuture(42)
-    .ensure(cob)
-    .then([](int) { throw std::runtime_error("ensure"); })
-    .ensure(cob);
-
-  EXPECT_THROW(f.get(), std::runtime_error);
-  EXPECT_EQ(2, count);
+TEST(Future, thenDynamic) {
+  // folly::dynamic has a constructor that takes any T, this test makes
+  // sure that we call the then lambda with folly::dynamic and not
+  // Try<folly::dynamic> because that then fails to compile
+  Promise<folly::dynamic> p;
+  Future<folly::dynamic> f = p.getFuture().then(
+      [](const folly::dynamic& d) {
+        return folly::dynamic(d.asInt() + 3);
+      }
+  );
+  p.setValue(2);
+  EXPECT_EQ(f.get(), 5);
 }
 
-TEST(Future, willEqual) {
-    //both p1 and p2 already fulfilled
-    {
-    Promise<int> p1;
-    Promise<int> p2;
-    p1.setValue(27);
-    p2.setValue(27);
-    auto f1 = p1.getFuture();
-    auto f2 = p2.getFuture();
-    EXPECT_TRUE(f1.willEqual(f2).get());
-    }{
-    Promise<int> p1;
-    Promise<int> p2;
-    p1.setValue(27);
-    p2.setValue(36);
-    auto f1 = p1.getFuture();
-    auto f2 = p2.getFuture();
-    EXPECT_FALSE(f1.willEqual(f2).get());
+TEST(Future, RequestContext) {
+  class NewThreadExecutor : public Executor {
+   public:
+    ~NewThreadExecutor() override {
+      std::for_each(v_.begin(), v_.end(), [](std::thread& t){ t.join(); });
     }
-    //both p1 and p2 not yet fulfilled
-    {
-    Promise<int> p1;
-    Promise<int> p2;
-    auto f1 = p1.getFuture();
-    auto f2 = p2.getFuture();
-    auto f3 = f1.willEqual(f2);
-    p1.setValue(27);
-    p2.setValue(27);
-    EXPECT_TRUE(f3.get());
-    }{
-    Promise<int> p1;
-    Promise<int> p2;
-    auto f1 = p1.getFuture();
-    auto f2 = p2.getFuture();
-    auto f3 = f1.willEqual(f2);
-    p1.setValue(27);
-    p2.setValue(36);
-    EXPECT_FALSE(f3.get());
+    void add(Func f) override {
+      if (throwsOnAdd_) { throw std::exception(); }
+      v_.emplace_back(std::move(f));
     }
-    //p1 already fulfilled, p2 not yet fulfilled
-    {
-    Promise<int> p1;
-    Promise<int> p2;
-    p1.setValue(27);
-    auto f1 = p1.getFuture();
-    auto f2 = p2.getFuture();
-    auto f3 = f1.willEqual(f2);
-    p2.setValue(27);
-    EXPECT_TRUE(f3.get());
-    }{
-    Promise<int> p1;
-    Promise<int> p2;
-    p1.setValue(27);
-    auto f1 = p1.getFuture();
-    auto f2 = p2.getFuture();
-    auto f3 = f1.willEqual(f2);
-    p2.setValue(36);
-    EXPECT_FALSE(f3.get());
+    void addWithPriority(Func f, int8_t /* prio */) override {
+      add(std::move(f));
     }
-    //p2 already fulfilled, p1 not yet fulfilled
-    {
-    Promise<int> p1;
-    Promise<int> p2;
-    p2.setValue(27);
-    auto f1 = p1.getFuture();
-    auto f2 = p2.getFuture();
-    auto f3 = f1.willEqual(f2);
-    p1.setValue(27);
-    EXPECT_TRUE(f3.get());
-    }{
-    Promise<int> p1;
-    Promise<int> p2;
-    p2.setValue(36);
-    auto f1 = p1.getFuture();
-    auto f2 = p2.getFuture();
-    auto f3 = f1.willEqual(f2);
-    p1.setValue(27);
-    EXPECT_FALSE(f3.get());
-    }
+    uint8_t getNumPriorities() const override { return numPriorities_; }
+
+    void setHandlesPriorities() { numPriorities_ = 2; }
+    void setThrowsOnAdd() { throwsOnAdd_ = true; }
+   private:
+    std::vector<std::thread> v_;
+    uint8_t numPriorities_ = 1;
+    bool throwsOnAdd_ = false;
+  };
+
+  struct MyRequestData : RequestData {
+    MyRequestData(bool value = false) : value(value) {}
+    bool value;
+  };
+
+  Promise<int> p1, p2;
+  NewThreadExecutor e;
+  {
+    folly::RequestContextScopeGuard rctx;
+    RequestContext::get()->setContextData(
+        "key", std::make_unique<MyRequestData>(true));
+    auto checker = [](int lineno) {
+      return [lineno](Try<int>&& /* t */) {
+        auto d = static_cast<MyRequestData*>(
+            RequestContext::get()->getContextData("key"));
+        EXPECT_TRUE(d && d->value) << "on line " << lineno;
+      };
+    };
+
+    makeFuture(1).via(&e).then(checker(__LINE__));
+
+    e.setHandlesPriorities();
+    makeFuture(2).via(&e).then(checker(__LINE__));
+
+    p1.getFuture().then(checker(__LINE__));
+
+    e.setThrowsOnAdd();
+    p2.getFuture().via(&e).then(checker(__LINE__));
+  }
+  // Assert that no RequestContext is set
+  EXPECT_FALSE(RequestContext::saveContext());
+  p1.setValue(3);
+  p2.setValue(4);
 }
 
-// Unwrap tests.
-
-// A simple scenario for the unwrap call, when the promise was fulfilled
-// before calling to unwrap.
-TEST(Future, Unwrap_SimpleScenario) {
-  Future<int> encapsulated_future = makeFuture(5484);
-  Future<Future<int>> future = makeFuture(std::move(encapsulated_future));
-  EXPECT_EQ(5484, future.unwrap().value());
+TEST(Future, makeFutureNoThrow) {
+  makeFuture().value();
 }
 
-// Makes sure that unwrap() works when chaning Future's commands.
-TEST(Future, Unwrap_ChainCommands) {
-  Future<Future<int>> future = makeFuture(makeFuture(5484));
-  auto unwrapped = future.unwrap().then([](int i){ return i; });
-  EXPECT_EQ(5484, unwrapped.value());
+TEST(Future, invokeCallbackReturningValueAsRvalue) {
+  struct Foo {
+    int operator()(int x) & {
+      return x + 1;
+    }
+    int operator()(int x) const& {
+      return x + 2;
+    }
+    int operator()(int x) && {
+      return x + 3;
+    }
+  };
+
+  Foo foo;
+  Foo const cfoo;
+
+  // The callback will be copied when given as lvalue or const ref, and moved
+  // if provided as rvalue. Either way, it should be executed as rvalue.
+  EXPECT_EQ(103, makeFuture<int>(100).then(foo).value());
+  EXPECT_EQ(203, makeFuture<int>(200).then(cfoo).value());
+  EXPECT_EQ(303, makeFuture<int>(300).then(Foo()).value());
 }
 
-// Makes sure that the unwrap call also works when the promise was not yet
-// fulfilled, and that the returned Future<T> becomes ready once the promise
-// is fulfilled.
-TEST(Future, Unwrap_FutureNotReady) {
-  Promise<Future<int>> p;
-  Future<Future<int>> future = p.getFuture();
-  Future<int> unwrapped = future.unwrap();
-  // Sanity - should not be ready before the promise is fulfilled.
-  ASSERT_FALSE(unwrapped.isReady());
-  // Fulfill the promise and make sure the unwrapped future is now ready.
-  p.setValue(makeFuture(5484));
-  ASSERT_TRUE(unwrapped.isReady());
-  EXPECT_EQ(5484, unwrapped.value());
+TEST(Future, invokeCallbackReturningFutureAsRvalue) {
+  struct Foo {
+    Future<int> operator()(int x) & {
+      return x + 1;
+    }
+    Future<int> operator()(int x) const& {
+      return x + 2;
+    }
+    Future<int> operator()(int x) && {
+      return x + 3;
+    }
+  };
+
+  Foo foo;
+  Foo const cfoo;
+
+  // The callback will be copied when given as lvalue or const ref, and moved
+  // if provided as rvalue. Either way, it should be executed as rvalue.
+  EXPECT_EQ(103, makeFuture<int>(100).then(foo).value());
+  EXPECT_EQ(203, makeFuture<int>(200).then(cfoo).value());
+  EXPECT_EQ(303, makeFuture<int>(300).then(Foo()).value());
+}
+
+TEST(Future, futureWithinCtxCleanedUpWhenTaskFinishedInTime) {
+  // Used to track the use_count of callbackInput even outside of its scope
+  std::weak_ptr<int> target;
+  {
+    Promise<std::shared_ptr<int>> promise;
+    auto input = std::make_shared<int>(1);
+    auto longEnough = std::chrono::milliseconds(1000);
+
+    promise.getFuture()
+        .within(longEnough)
+        .then([&target](
+                  folly::Try<std::shared_ptr<int>>&& callbackInput) mutable {
+          target = callbackInput.value();
+        });
+    promise.setValue(input);
+  }
+  // After promise's life cycle is finished, make sure no one is holding the
+  // input anymore, in other words, ctx should have been cleaned up.
+  EXPECT_EQ(0, target.use_count());
+}
+
+TEST(Future, futureWithinNoValueReferenceWhenTimeOut) {
+  Promise<std::shared_ptr<int>> promise;
+  auto veryShort = std::chrono::milliseconds(1);
+
+  promise.getFuture().within(veryShort).then(
+      [](folly::Try<std::shared_ptr<int>>&& callbackInput) {
+        // Timeout is fired. Verify callbackInput is not referenced
+        EXPECT_EQ(0, callbackInput.value().use_count());
+      });
 }

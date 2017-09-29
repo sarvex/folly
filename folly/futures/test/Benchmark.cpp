@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,16 +14,17 @@
  * limitations under the License.
  */
 
-#include <gflags/gflags.h>
-#include <folly/Baton.h>
 #include <folly/Benchmark.h>
+#include <folly/Baton.h>
 #include <folly/futures/Future.h>
+#include <folly/futures/InlineExecutor.h>
 #include <folly/futures/Promise.h>
-#include <semaphore.h>
+#include <folly/portability/GFlags.h>
+#include <folly/portability/Semaphore.h>
+
 #include <vector>
 
 using namespace folly;
-using namespace std;
 
 namespace {
 
@@ -39,13 +40,12 @@ void someThens(size_t n) {
   }
 }
 
-} // anonymous namespace
+} // namespace
 
 BENCHMARK(constantFuture) {
   makeFuture(42);
 }
 
-// This shouldn't get too far below 100%
 BENCHMARK_RELATIVE(promiseAndFuture) {
   Promise<int> p;
   Future<int> f = p.getFuture();
@@ -53,7 +53,6 @@ BENCHMARK_RELATIVE(promiseAndFuture) {
   f.value();
 }
 
-// The higher the better. At the time of writing, it's only about 40% :(
 BENCHMARK_RELATIVE(withThen) {
   Promise<int> p;
   Future<int> f = p.getFuture().then(incr<int>);
@@ -83,14 +82,14 @@ BENCHMARK_RELATIVE(hundredThens) {
   someThens(100);
 }
 
-// Lock contention. Although in practice fulfil()s tend to be temporally
+// Lock contention. Although in practice fulfills tend to be temporally
 // separate from then()s, still sometimes they will be concurrent. So the
 // higher this number is, the better.
 BENCHMARK_DRAW_LINE()
 
 BENCHMARK(no_contention) {
-  vector<Promise<int>> promises(10000);
-  vector<Future<int>> futures;
+  std::vector<Promise<int>> promises(10000);
+  std::vector<Future<int>> futures;
   std::thread producer, consumer;
 
   BENCHMARK_SUSPEND {
@@ -113,13 +112,13 @@ BENCHMARK(no_contention) {
     b2.wait();
   }
 
-  // The only thing we are measuring is how long fulfil + callbacks take
+  // The only thing we are measuring is how long fulfill + callbacks take
   producer.join();
 }
 
 BENCHMARK_RELATIVE(contention) {
-  vector<Promise<int>> promises(10000);
-  vector<Future<int>> futures;
+  std::vector<Promise<int>> promises(10000);
+  std::vector<Future<int>> futures;
   std::thread producer, consumer;
   sem_t sem;
   sem_init(&sem, 0, 0);
@@ -170,8 +169,8 @@ BENCHMARK_DRAW_LINE();
 // The old way. Throw an exception, and rethrow to access it upstream.
 void throwAndCatchImpl() {
   makeFuture()
-      .then([](Try<void>&&){ throw std::runtime_error("oh no"); })
-      .then([](Try<void>&& t) {
+      .then([](Try<Unit>&&){ throw std::runtime_error("oh no"); })
+      .then([](Try<Unit>&& t) {
         try {
           t.value();
         } catch(const std::runtime_error& e) {
@@ -190,10 +189,10 @@ void throwAndCatchImpl() {
 // will try to wrap, so no exception_ptrs/rethrows are necessary.
 void throwAndCatchWrappedImpl() {
   makeFuture()
-      .then([](Try<void>&&){ throw std::runtime_error("oh no"); })
-      .then([](Try<void>&& t) {
+      .then([](Try<Unit>&&) { throw std::runtime_error("oh no"); })
+      .then([](Try<Unit>&& t) {
         auto caught = t.withException<std::runtime_error>(
-            [](const std::runtime_error& e){
+            [](const std::runtime_error& /* e */) {
               // ...
             });
         CHECK(caught);
@@ -203,10 +202,10 @@ void throwAndCatchWrappedImpl() {
 // Better. Wrap an exception, and rethrow to access it upstream.
 void throwWrappedAndCatchImpl() {
   makeFuture()
-      .then([](Try<void>&&){
-        return makeFuture<void>(std::runtime_error("oh no"));
+      .then([](Try<Unit>&&){
+        return makeFuture<Unit>(std::runtime_error("oh no"));
       })
-      .then([](Try<void>&& t) {
+      .then([](Try<Unit>&& t) {
         try {
           t.value();
         } catch(const std::runtime_error& e) {
@@ -220,12 +219,12 @@ void throwWrappedAndCatchImpl() {
 // The new way. Wrap an exception, and access it via the wrapper upstream
 void throwWrappedAndCatchWrappedImpl() {
   makeFuture()
-      .then([](Try<void>&&){
-        return makeFuture<void>(std::runtime_error("oh no"));
+      .then([](Try<Unit>&&) {
+        return makeFuture<Unit>(std::runtime_error("oh no"));
       })
-      .then([](Try<void>&& t){
+      .then([](Try<Unit>&& t) {
         auto caught = t.withException<std::runtime_error>(
-            [](const std::runtime_error& e){
+            [](const std::runtime_error& /* e */) {
               // ...
             });
         CHECK(caught);
@@ -289,6 +288,136 @@ BENCHMARK_RELATIVE(throwWrappedAndCatchContended) {
 
 BENCHMARK_RELATIVE(throwWrappedAndCatchWrappedContended) {
   contend(throwWrappedAndCatchWrappedImpl);
+}
+
+BENCHMARK_DRAW_LINE();
+
+namespace {
+struct Bulky {
+  explicit Bulky(std::string message) : message_(message) {}
+  std::string message() & {
+    return message_;
+  }
+  std::string&& message() && {
+    return std::move(message_);
+  }
+
+ private:
+  std::string message_;
+  std::array<int, 1024> ints_;
+};
+} // anonymous namespace
+
+BENCHMARK(lvalue_get) {
+  BenchmarkSuspender suspender;
+  Optional<Future<Bulky>> future;
+  future = makeFuture(Bulky("Hello"));
+  suspender.dismissing([&] {
+    std::string message = future.value().get().message();
+    doNotOptimizeAway(message);
+  });
+}
+
+BENCHMARK_RELATIVE(rvalue_get) {
+  BenchmarkSuspender suspender;
+  Optional<Future<Bulky>> future;
+  future = makeFuture(Bulky("Hello"));
+  suspender.dismissing([&] {
+    std::string message = std::move(future.value()).get().message();
+    doNotOptimizeAway(message);
+  });
+}
+
+InlineExecutor exe;
+
+template <class T>
+Future<T> fGen() {
+  Promise<T> p;
+  auto f = p.getFuture()
+    .then([] (T&& t) {
+      return std::move(t);
+    })
+    .then([] (T&& t) {
+      return makeFuture(std::move(t));
+    })
+    .via(&exe)
+    .then([] (T&& t) {
+      return std::move(t);
+    })
+    .then([] (T&& t) {
+      return makeFuture(std::move(t));
+    });
+  p.setValue(T());
+  return f;
+}
+
+template <class T>
+std::vector<Future<T>> fsGen() {
+  std::vector<Future<T>> fs;
+  for (auto i = 0; i < 10; i++) {
+    fs.push_back(fGen<T>());
+  }
+  return fs;
+}
+
+template <class T>
+void complexBenchmark() {
+  collect(fsGen<T>());
+  collectAll(fsGen<T>());
+  collectAny(fsGen<T>());
+  futures::map(fsGen<T>(), [] (const T& t) {
+    return t;
+  });
+  futures::map(fsGen<T>(), [] (const T& t) {
+    return makeFuture(T(t));
+  });
+}
+
+BENCHMARK_DRAW_LINE();
+
+template <size_t S>
+struct Blob {
+  char buf[S];
+};
+
+BENCHMARK(complexUnit) {
+  complexBenchmark<Unit>();
+}
+
+BENCHMARK_RELATIVE(complexBlob4) {
+  complexBenchmark<Blob<4>>();
+}
+
+BENCHMARK_RELATIVE(complexBlob8) {
+  complexBenchmark<Blob<8>>();
+}
+
+BENCHMARK_RELATIVE(complexBlob64) {
+  complexBenchmark<Blob<64>>();
+}
+
+BENCHMARK_RELATIVE(complexBlob128) {
+  complexBenchmark<Blob<128>>();
+}
+
+BENCHMARK_RELATIVE(complexBlob256) {
+  complexBenchmark<Blob<256>>();
+}
+
+BENCHMARK_RELATIVE(complexBlob512) {
+  complexBenchmark<Blob<512>>();
+}
+
+BENCHMARK_RELATIVE(complexBlob1024) {
+  complexBenchmark<Blob<1024>>();
+}
+
+BENCHMARK_RELATIVE(complexBlob2048) {
+  complexBenchmark<Blob<2048>>();
+}
+
+BENCHMARK_RELATIVE(complexBlob4096) {
+  complexBenchmark<Blob<4096>>();
 }
 
 int main(int argc, char** argv) {

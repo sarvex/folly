@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,10 +14,10 @@
  * limitations under the License.
  */
 
-#ifndef FOLLY_FORMATARG_H_
-#define FOLLY_FORMATARG_H_
+#pragma once
 
 #include <stdexcept>
+
 #include <folly/Conv.h>
 #include <folly/Likely.h>
 #include <folly/Portability.h>
@@ -26,10 +26,11 @@
 namespace folly {
 
 class BadFormatArg : public std::invalid_argument {
- public:
-  explicit BadFormatArg(const std::string& msg)
-    : std::invalid_argument(msg) {}
+  using invalid_argument::invalid_argument;
 };
+
+[[noreturn]] void throwBadFormatArg(char const* msg);
+[[noreturn]] void throwBadFormatArg(std::string const& msg);
 
 /**
  * Parsed format argument.
@@ -48,6 +49,7 @@ struct FormatArg {
       thousandsSeparator(false),
       trailingDot(false),
       width(kDefaultWidth),
+      widthIndex(kNoIndex),
       precision(kDefaultPrecision),
       presentation(kDefaultPresentation),
       nextKeyMode_(NextKeyMode::NONE) {
@@ -81,7 +83,7 @@ struct FormatArg {
   template <typename... Args>
   std::string errorStr(Args&&... args) const;
   template <typename... Args>
-  FOLLY_NORETURN void error(Args&&... args) const;
+  [[noreturn]] void error(Args&&... args) const;
 
   /**
    * Full argument string, as passed in to the constructor.
@@ -135,10 +137,13 @@ struct FormatArg {
   bool trailingDot;
 
   /**
-   * Field width
+   * Field width and optional argument index
    */
   static constexpr int kDefaultWidth = -1;
+  static constexpr int kDynamicWidth = -2;
+  static constexpr int kNoIndex = -1;
   int width;
+  int widthIndex;
 
   /**
    * Precision
@@ -208,8 +213,8 @@ inline std::string FormatArg::errorStr(Args&&... args) const {
 }
 
 template <typename... Args>
-inline void FormatArg::error(Args&&... args) const {
-  throw BadFormatArg(errorStr(std::forward<Args>(args)...));
+[[noreturn]] inline void FormatArg::error(Args&&... args) const {
+  throwBadFormatArg(errorStr(std::forward<Args>(args)...));
 }
 
 template <bool emptyOk>
@@ -240,10 +245,10 @@ inline StringPiece FormatArg::doSplitKey() {
   const char* p;
   if (e[-1] == ']') {
     --e;
-    p = static_cast<const char*>(memchr(b, '[', e - b));
-    enforce(p, "unmatched ']'");
+    p = static_cast<const char*>(memchr(b, '[', size_t(e - b)));
+    enforce(p != nullptr, "unmatched ']'");
   } else {
-    p = static_cast<const char*>(memchr(b, '.', e - b));
+    p = static_cast<const char*>(memchr(b, '.', size_t(e - b)));
   }
   if (p) {
     key_.assign(p + 1, e);
@@ -264,12 +269,10 @@ inline int FormatArg::splitIntKey() {
   }
   try {
     return to<int>(doSplitKey<true>());
-  } catch (const std::out_of_range& e) {
+  } catch (const std::out_of_range&) {
     error("integer key required");
     return 0;  // unreached
   }
 }
 
-}  // namespace folly
-
-#endif /* FOLLY_FORMATARG_H_ */
+} // namespace folly

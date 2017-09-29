@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,39 +14,41 @@
  * limitations under the License.
  */
 
-#ifndef FOLLY_GROUPVARINT_H_
-#define FOLLY_GROUPVARINT_H_
+#pragma once
 
-#ifndef __GNUC__
-#error GroupVarint.h requires GCC
+#include <cstdint>
+#include <limits>
+
+#include <glog/logging.h>
+
+#if !defined(__GNUC__) && !defined(_MSC_VER)
+#error GroupVarint.h requires GCC or MSVC
 #endif
 
 #include <folly/Portability.h>
 
-#if FOLLY_X64 || defined(__i386__)
+#if FOLLY_X64 || defined(__i386__) || FOLLY_PPC64 || FOLLY_AARCH64
 #define HAVE_GROUP_VARINT 1
 
-#include <cstdint>
-#include <limits>
-#include <folly/detail/GroupVarintDetail.h>
 #include <folly/Bits.h>
 #include <folly/Range.h>
-#include <glog/logging.h>
+#include <folly/detail/GroupVarintDetail.h>
+#include <folly/portability/Builtins.h>
 
-#ifdef __SSSE3__
-#include <x86intrin.h>
+#if FOLLY_SSE >= 3
+#include <nmmintrin.h>
 namespace folly {
 namespace detail {
-extern const __m128i groupVarintSSEMasks[];
-}  // namespace detail
-}  // namespace folly
+alignas(16) extern const uint64_t groupVarintSSEMasks[];
+} // namespace detail
+} // namespace folly
 #endif
 
 namespace folly {
 namespace detail {
 extern const uint8_t groupVarintLengths[];
-}  // namespace detail
-}  // namespace folly
+} // namespace detail
+} // namespace folly
 
 namespace folly {
 
@@ -102,7 +104,7 @@ class GroupVarint<uint32_t> : public detail::GroupVarintBase<uint32_t> {
    * buffer of size bytes.
    */
   static size_t partialCount(const char* p, size_t size) {
-    char v = *p;
+    uint8_t v = uint8_t(*p);
     size_t s = kHeaderSize;
     s += 1 + b0key(v);
     if (s > size) return 0;
@@ -120,8 +122,9 @@ class GroupVarint<uint32_t> : public detail::GroupVarintBase<uint32_t> {
    * return the number of bytes used by the encoding.
    */
   static size_t encodedSize(const char* p) {
-    return (kHeaderSize + kGroupSize +
-            b0key(*p) + b1key(*p) + b2key(*p) + b3key(*p));
+    return kHeaderSize + kGroupSize +
+           b0key(uint8_t(*p)) + b1key(uint8_t(*p)) +
+           b2key(uint8_t(*p)) + b3key(uint8_t(*p));
   }
 
   /**
@@ -188,15 +191,16 @@ class GroupVarint<uint32_t> : public detail::GroupVarintBase<uint32_t> {
     return decode_simple(p, dest, dest+1, dest+2, dest+3);
   }
 
-#ifdef __SSSE3__
+#if FOLLY_SSE >= 3
   /**
    * Just like the non-SSSE3 decode below, but with the additional constraint
    * that we must be able to read at least 17 bytes from the input pointer, p.
    */
   static const char* decode(const char* p, uint32_t* dest) {
-    uint8_t key = p[0];
+    uint8_t key = uint8_t(p[0]);
     __m128i val = _mm_loadu_si128((const __m128i*)(p+1));
-    __m128i mask = detail::groupVarintSSEMasks[key];
+    __m128i mask =
+        _mm_load_si128((const __m128i*)&detail::groupVarintSSEMasks[key * 2]);
     __m128i r = _mm_shuffle_epi8(val, mask);
     _mm_storeu_si128((__m128i*)dest, r);
     return p + detail::groupVarintLengths[key];
@@ -208,17 +212,18 @@ class GroupVarint<uint32_t> : public detail::GroupVarintBase<uint32_t> {
    */
   static const char* decode(const char* p, uint32_t* a, uint32_t* b,
                             uint32_t* c, uint32_t* d) {
-    uint8_t key = p[0];
+    uint8_t key = uint8_t(p[0]);
     __m128i val = _mm_loadu_si128((const __m128i*)(p+1));
-    __m128i mask = detail::groupVarintSSEMasks[key];
+    __m128i mask =
+        _mm_load_si128((const __m128i*)&detail::groupVarintSSEMasks[key * 2]);
     __m128i r = _mm_shuffle_epi8(val, mask);
 
     // Extracting 32 bits at a time out of an XMM register is a SSE4 feature
-#ifdef __SSE4__
-    *a = _mm_extract_epi32(r, 0);
-    *b = _mm_extract_epi32(r, 1);
-    *c = _mm_extract_epi32(r, 2);
-    *d = _mm_extract_epi32(r, 3);
+#if FOLLY_SSE >= 4
+    *a = uint32_t(_mm_extract_epi32(r, 0));
+    *b = uint32_t(_mm_extract_epi32(r, 1));
+    *c = uint32_t(_mm_extract_epi32(r, 2));
+    *d = uint32_t(_mm_extract_epi32(r, 3));
 #else  /* !__SSE4__ */
     *a = _mm_extract_epi16(r, 0) + (_mm_extract_epi16(r, 1) << 16);
     *b = _mm_extract_epi16(r, 2) + (_mm_extract_epi16(r, 3) << 16);
@@ -243,7 +248,7 @@ class GroupVarint<uint32_t> : public detail::GroupVarintBase<uint32_t> {
  private:
   static uint8_t key(uint32_t x) {
     // __builtin_clz is undefined for the x==0 case
-    return 3 - (__builtin_clz(x|1) / 8);
+    return uint8_t(3 - (__builtin_clz(x | 1) / 8));
   }
   static size_t b0key(size_t x) { return x & 3; }
   static size_t b1key(size_t x) { return (x >> 2) & 3; }
@@ -272,8 +277,8 @@ class GroupVarint<uint64_t> : public detail::GroupVarintBase<uint64_t> {
    */
   static size_t size(uint64_t a, uint64_t b, uint64_t c, uint64_t d,
                      uint64_t e) {
-    return (kHeaderSize + kGroupSize +
-            key(a) + key(b) + key(c) + key(d) + key(e));
+    return kHeaderSize + kGroupSize +
+           key(a) + key(b) + key(c) + key(d) + key(e);
   }
 
   /**
@@ -325,8 +330,8 @@ class GroupVarint<uint64_t> : public detail::GroupVarintBase<uint64_t> {
    */
   static size_t encodedSize(const char* p) {
     uint16_t n = loadUnaligned<uint16_t>(p);
-    return (kHeaderSize + kGroupSize +
-            b0key(n) + b1key(n) + b2key(n) + b3key(n) + b4key(n));
+    return kHeaderSize + kGroupSize +
+            b0key(n) + b1key(n) + b2key(n) + b3key(n) + b4key(n);
   }
 
   /**
@@ -336,14 +341,19 @@ class GroupVarint<uint64_t> : public detail::GroupVarintBase<uint64_t> {
    */
   static char* encode(char* p, uint64_t a, uint64_t b, uint64_t c,
                       uint64_t d, uint64_t e) {
-    uint8_t b0key = key(a);
-    uint8_t b1key = key(b);
-    uint8_t b2key = key(c);
-    uint8_t b3key = key(d);
-    uint8_t b4key = key(e);
+    uint16_t b0key = key(a);
+    uint16_t b1key = key(b);
+    uint16_t b2key = key(c);
+    uint16_t b3key = key(d);
+    uint16_t b4key = key(e);
     storeUnaligned<uint16_t>(
         p,
-        (b4key << 12) | (b3key << 9) | (b2key << 6) | (b1key << 3) | b0key);
+        uint16_t(
+            (b4key << 12) |
+            (b3key << 9) |
+            (b2key << 6) |
+            (b1key << 3) |
+            b0key));
     p += 2;
     storeUnaligned(p, a);
     p += b0key+1;
@@ -407,14 +417,14 @@ class GroupVarint<uint64_t> : public detail::GroupVarintBase<uint64_t> {
 
   static uint8_t key(uint64_t x) {
     // __builtin_clzll is undefined for the x==0 case
-    return 7 - (__builtin_clzll(x|1) / 8);
+    return uint8_t(7 - (__builtin_clzll(x | 1) / 8));
   }
 
-  static uint8_t b0key(uint16_t x) { return x & 7; }
-  static uint8_t b1key(uint16_t x) { return (x >> 3) & 7; }
-  static uint8_t b2key(uint16_t x) { return (x >> 6) & 7; }
-  static uint8_t b3key(uint16_t x) { return (x >> 9) & 7; }
-  static uint8_t b4key(uint16_t x) { return (x >> 12) & 7; }
+  static uint8_t b0key(uint16_t x) { return x & 7u; }
+  static uint8_t b1key(uint16_t x) { return (x >> 3) & 7u; }
+  static uint8_t b2key(uint16_t x) { return (x >> 6) & 7u; }
+  static uint8_t b3key(uint16_t x) { return (x >> 9) & 7u; }
+  static uint8_t b4key(uint16_t x) { return (x >> 12) & 7u; }
 
   static const uint64_t kMask[];
 };
@@ -512,7 +522,7 @@ class GroupVarintDecoder {
   typedef GroupVarint<T> Base;
   typedef T type;
 
-  GroupVarintDecoder() { }
+  GroupVarintDecoder() = default;
 
   explicit GroupVarintDecoder(StringPiece data,
                               size_t maxCount = (size_t)-1)
@@ -541,7 +551,7 @@ class GroupVarintDecoder {
   bool next(type* val) {
     if (pos_ == count_) {
       // refill
-      size_t rem = end_ - p_;
+      size_t rem = size_t(end_ - p_);
       if (rem == 0 || remaining_ == 0) {
         return false;
       }
@@ -573,7 +583,7 @@ class GroupVarintDecoder {
         }
       } else {
         // Can't decode a full group
-        count_ = Base::partialCount(p_, end_ - p_);
+        count_ = Base::partialCount(p_, size_t(end_ - p_));
         if (remaining_ >= count_) {
           remaining_ -= count_;
           p_ = end_;
@@ -596,7 +606,7 @@ class GroupVarintDecoder {
     CHECK(pos_ == count_ && (p_ == end_ || remaining_ == 0));
     // p_ may point to the internal buffer (tmp_), but we want
     // to return subpiece of the original data
-    size_t size = end_ - p_;
+    size_t size = size_t(end_ - p_);
     return StringPiece(rrest_ - size, rrest_);
   }
 
@@ -615,7 +625,6 @@ class GroupVarintDecoder {
 typedef GroupVarintDecoder<uint32_t> GroupVarint32Decoder;
 typedef GroupVarintDecoder<uint64_t> GroupVarint64Decoder;
 
-}  // namespace folly
+} // namespace folly
 
-#endif /* FOLLY_X64 || defined(__i386__) */
-#endif /* FOLLY_GROUPVARINT_H_ */
+#endif /* FOLLY_X64 || defined(__i386__) || FOLLY_PPC64 */

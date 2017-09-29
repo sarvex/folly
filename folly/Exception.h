@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,8 +14,7 @@
  * limitations under the License.
  */
 
-#ifndef FOLLY_EXCEPTION_H_
-#define FOLLY_EXCEPTION_H_
+#pragma once
 
 #include <errno.h>
 
@@ -37,24 +36,19 @@ namespace folly {
 // The *Explicit functions take an explicit value for errno.
 
 // Helper to throw std::system_error
-FOLLY_NORETURN void throwSystemErrorExplicit(int err, const char*);
-inline void throwSystemErrorExplicit(int err, const char* msg) {
+[[noreturn]] inline void throwSystemErrorExplicit(int err, const char* msg) {
   throw std::system_error(err, std::system_category(), msg);
 }
 
 template <class... Args>
-FOLLY_NORETURN void throwSystemErrorExplicit(int, Args&&... args);
-template <class... Args>
-void throwSystemErrorExplicit(int err, Args&&... args) {
+[[noreturn]] void throwSystemErrorExplicit(int err, Args&&... args) {
   throwSystemErrorExplicit(
       err, to<fbstring>(std::forward<Args>(args)...).c_str());
 }
 
 // Helper to throw std::system_error from errno and components of a string
 template <class... Args>
-FOLLY_NORETURN void throwSystemError(Args&&... args);
-template <class... Args>
-void throwSystemError(Args&&... args) {
+[[noreturn]] void throwSystemError(Args&&... args) {
   throwSystemErrorExplicit(errno, std::forward<Args>(args)...);
 }
 
@@ -72,7 +66,7 @@ void checkPosixError(int err, Args&&... args) {
 template <class... Args>
 void checkKernelError(ssize_t ret, Args&&... args) {
   if (UNLIKELY(ret < 0)) {
-    throwSystemErrorExplicit(-ret, std::forward<Args>(args)...);
+    throwSystemErrorExplicit(int(-ret), std::forward<Args>(args)...);
   }
 }
 
@@ -109,20 +103,15 @@ void checkFopenErrorExplicit(FILE* fp, int savedErrno, Args&&... args) {
   }
 }
 
-template <typename E, typename V, typename... Args>
-void throwOnFail(V&& value, Args&&... args) {
-  if (!value) {
-    throw E(std::forward<Args>(args)...);
-  }
-}
-
 /**
  * If cond is not true, raise an exception of type E.  E must have a ctor that
  * works with const char* (a description of the failure).
  */
-#define CHECK_THROW(cond, E) \
-  ::folly::throwOnFail<E>((cond), "Check failed: " #cond)
+#define CHECK_THROW(cond, E)           \
+  do {                                 \
+    if (!(cond)) {                     \
+      throw E("Check failed: " #cond); \
+    }                                  \
+  } while (0)
 
-}  // namespace folly
-
-#endif /* FOLLY_EXCEPTION_H_ */
+} // namespace folly

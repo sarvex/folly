@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,12 +16,13 @@
 
 #pragma once
 
-#include <atomic>
-#include <functional>
+#include <climits>
+
+#include <folly/Function.h>
 
 namespace folly {
 
-typedef std::function<void()> Func;
+using Func = Function<void()>;
 
 /// An Executor accepts units of work with add(), which should be
 /// threadsafe.
@@ -33,6 +34,18 @@ class Executor {
   /// variants must be threadsafe.
   virtual void add(Func) = 0;
 
+  /// Enqueue a function with a given priority, where 0 is the medium priority
+  /// This is up to the implementation to enforce
+  virtual void addWithPriority(Func, int8_t priority);
+
+  virtual uint8_t getNumPriorities() const {
+    return 1;
+  }
+
+  static const int8_t LO_PRI  = SCHAR_MIN;
+  static const int8_t MID_PRI = 0;
+  static const int8_t HI_PRI  = SCHAR_MAX;
+
   /// A convenience function for shared_ptr to legacy functors.
   ///
   /// Sometimes you have a functor that is move-only, and therefore can't be
@@ -42,6 +55,47 @@ class Executor {
   void addPtr(P fn) {
     this->add([fn]() mutable { (*fn)(); });
   }
+
+  class KeepAlive {
+   public:
+    KeepAlive() {}
+
+    void reset() {
+      executor_.reset();
+    }
+
+    explicit operator bool() const {
+      return executor_ != nullptr;
+    }
+
+   private:
+    friend class Executor;
+    explicit KeepAlive(folly::Executor* executor) : executor_(executor) {}
+
+    struct Deleter {
+      void operator()(folly::Executor* executor) {
+        executor->keepAliveRelease();
+      }
+    };
+    std::unique_ptr<folly::Executor, Deleter> executor_;
+  };
+
+  /// Returns a keep-alive token which guarantees that Executor will keep
+  /// processing tasks until the token is released. keep-alive token can only
+  /// be destroyed from within the task, scheduled to be run on an executor.
+  ///
+  /// If executor does not support keep-alive functionality - dummy token will
+  /// be returned.
+  virtual KeepAlive getKeepAliveToken() {
+    return {};
+  }
+
+ protected:
+  virtual void keepAliveRelease();
+
+  KeepAlive makeKeepAlive() {
+    return KeepAlive{this};
+  }
 };
 
-} // folly
+} // namespace folly

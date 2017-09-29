@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,15 +16,15 @@
 
 #include <folly/experimental/TestUtil.h>
 
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <fcntl.h>
-
 #include <system_error>
 
 #include <boost/algorithm/string.hpp>
 #include <glog/logging.h>
-#include <gtest/gtest.h>
+
+#include <folly/Memory.h>
+#include <folly/portability/Fcntl.h>
+#include <folly/portability/GTest.h>
+#include <folly/portability/Stdlib.h>
 
 using namespace folly;
 using namespace folly::test;
@@ -42,13 +42,28 @@ TEST(TemporaryFile, Simple) {
     EXPECT_EQ(1, r);
   }
 
-  // The file must have been closed.  This assumes that no other thread
-  // has opened another file in the meanwhile, which is a sane assumption
-  // to make in this test.
-  ssize_t r = write(fd, &c, 1);
-  int savedErrno = errno;
-  EXPECT_EQ(-1, r);
-  EXPECT_EQ(EBADF, savedErrno);
+  msvcSuppressAbortOnInvalidParams([&] {
+    // The file must have been closed.  This assumes that no other thread
+    // has opened another file in the meanwhile, which is a sane assumption
+    // to make in this test.
+    ssize_t r = write(fd, &c, 1);
+    int savedErrno = errno;
+    EXPECT_EQ(-1, r);
+    EXPECT_EQ(EBADF, savedErrno);
+  });
+}
+
+TEST(TemporaryFile, EarlyClose) {
+  fs::path p;
+  {
+    TemporaryFile f;
+    p = f.path();
+    EXPECT_TRUE(fs::exists(p));
+    f.close();
+    EXPECT_EQ(-1, f.fd());
+    EXPECT_TRUE(fs::exists(p));
+  }
+  EXPECT_FALSE(fs::exists(p));
 }
 
 TEST(TemporaryFile, Prefix) {
@@ -81,7 +96,7 @@ void testTemporaryDirectory(TemporaryDirectory::Scope scope) {
     EXPECT_TRUE(fs::is_directory(path));
 
     fs::path fp = path / "bar";
-    int fd = open(fp.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0666);
+    int fd = open(fp.string().c_str(), O_RDWR | O_CREAT | O_TRUNC, 0666);
     EXPECT_NE(fd, -1);
     close(fd);
 
@@ -100,8 +115,88 @@ TEST(TemporaryDirectory, DeleteOnDestruction) {
   testTemporaryDirectory(TemporaryDirectory::Scope::DELETE_ON_DESTRUCTION);
 }
 
-int main(int argc, char *argv[]) {
-  testing::InitGoogleTest(&argc, argv);
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
-  return RUN_ALL_TESTS();
+void expectTempdirExists(const TemporaryDirectory& d) {
+  EXPECT_FALSE(d.path().empty());
+  EXPECT_TRUE(fs::exists(d.path()));
+  EXPECT_TRUE(fs::is_directory(d.path()));
+}
+
+TEST(TemporaryDirectory, SafelyMove) {
+  std::unique_ptr<TemporaryDirectory> dir;
+  TemporaryDirectory dir2;
+  {
+    auto scope = TemporaryDirectory::Scope::DELETE_ON_DESTRUCTION;
+    TemporaryDirectory d("", "", scope);
+    TemporaryDirectory d2("", "", scope);
+    expectTempdirExists(d);
+    expectTempdirExists(d2);
+
+    dir = std::make_unique<TemporaryDirectory>(std::move(d));
+    dir2 = std::move(d2);
+  }
+
+  expectTempdirExists(*dir);
+  expectTempdirExists(dir2);
+}
+
+TEST(ChangeToTempDir, ChangeDir) {
+  auto pwd1 = fs::current_path();
+  {
+    ChangeToTempDir d;
+    EXPECT_NE(pwd1, fs::current_path());
+  }
+  EXPECT_EQ(pwd1, fs::current_path());
+}
+
+TEST(PCREPatternMatch, Simple) {
+  EXPECT_PCRE_MATCH(".*a.c.*", "gabca");
+  EXPECT_NO_PCRE_MATCH("a.c", "gabca");
+  EXPECT_NO_PCRE_MATCH(".*ac.*", "gabca");
+}
+
+TEST(CaptureFD, GlogPatterns) {
+  CaptureFD err(fileno(stderr));
+  LOG(INFO) << "All is well";
+  EXPECT_NO_PCRE_MATCH(glogErrOrWarnPattern(), err.readIncremental());
+  {
+    LOG(ERROR) << "Uh-oh";
+    auto s = err.readIncremental();
+    EXPECT_PCRE_MATCH(glogErrorPattern(), s);
+    EXPECT_NO_PCRE_MATCH(glogWarningPattern(), s);
+    EXPECT_PCRE_MATCH(glogErrOrWarnPattern(), s);
+  }
+  {
+    LOG(WARNING) << "Oops";
+    auto s = err.readIncremental();
+    EXPECT_NO_PCRE_MATCH(glogErrorPattern(), s);
+    EXPECT_PCRE_MATCH(glogWarningPattern(), s);
+    EXPECT_PCRE_MATCH(glogErrOrWarnPattern(), s);
+  }
+}
+
+TEST(CaptureFD, ChunkCob) {
+  std::vector<std::string> chunks;
+  {
+    CaptureFD err(fileno(stderr), [&](StringPiece p) {
+      chunks.emplace_back(p.str());
+      switch (chunks.size()) {
+        case 1:
+          EXPECT_PCRE_MATCH(".*foo.*bar.*", p);
+          break;
+        case 2:
+          EXPECT_PCRE_MATCH("[^\n]*baz.*", p);
+          break;
+        default:
+          FAIL() << "Got too many chunks: " << chunks.size();
+      }
+    });
+    LOG(INFO) << "foo";
+    LOG(INFO) << "bar";
+    EXPECT_PCRE_MATCH(".*foo.*bar.*", err.read());
+    auto chunk = err.readIncremental();
+    EXPECT_EQ(chunks.at(0), chunk);
+    LOG(INFO) << "baz";
+    EXPECT_PCRE_MATCH(".*foo.*bar.*baz.*", err.read());
+  }
+  EXPECT_EQ(2, chunks.size());
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,11 +25,9 @@
 class Exception : public std::exception {
  public:
   explicit Exception(const std::string& value) : value_(value) {}
-  virtual ~Exception(void) noexcept {}
+  ~Exception(void) noexcept override {}
 
-  virtual const char *what(void) const noexcept {
-    return value_.c_str();
-  }
+  const char* what(void) const noexcept override { return value_.c_str(); }
 
  private:
   std::string value_;
@@ -38,6 +36,7 @@ class Exception : public std::exception {
 void doNothing() {
 }
 
+[[noreturn]]
 void throwException() {
   throw Exception("this is a test");
 }
@@ -78,3 +77,18 @@ VirtualClass::~VirtualClass() {
 
 void VirtualClass::doNothing() {
 };
+
+LargeClass::LargeClass() {
+  // Suppress unused field warning
+  data[0] = 42;
+}
+
+void LargeClass::operator()() const {}
+
+void invoke(std::function<void()> f) {
+  f();
+}
+
+void invoke(folly::Function<void()> f) {
+  f();
+}

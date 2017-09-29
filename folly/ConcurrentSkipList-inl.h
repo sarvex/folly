@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,8 +16,7 @@
 
 // @author: Xin Liu <xliux@fb.com>
 
-#ifndef FOLLY_CONCURRENTSKIPLIST_INL_H_
-#define FOLLY_CONCURRENTSKIPLIST_INL_H_
+#pragma once
 
 #include <algorithm>
 #include <atomic>
@@ -27,31 +26,36 @@
 #include <mutex>
 #include <type_traits>
 #include <vector>
+
 #include <boost/noncopyable.hpp>
 #include <boost/random.hpp>
 #include <boost/type_traits.hpp>
 #include <glog/logging.h>
 
 #include <folly/Memory.h>
-#include <folly/SmallLocks.h>
+#include <folly/MicroSpinLock.h>
 #include <folly/ThreadLocal.h>
 
 namespace folly { namespace detail {
 
-template<typename ValT, typename NodeT> class csl_iterator;
+template <typename ValT, typename NodeT> class csl_iterator;
 
-template<typename T>
+template <typename T>
 class SkipListNode : private boost::noncopyable {
-  enum {
+  enum : uint16_t {
     IS_HEAD_NODE = 1,
     MARKED_FOR_REMOVAL = (1 << 1),
     FULLY_LINKED = (1 << 2),
   };
+
  public:
   typedef T value_type;
 
-  template<typename NodeAlloc, typename U,
-    typename=typename std::enable_if<std::is_convertible<U, T>::value>::type>
+  template <
+      typename NodeAlloc,
+      typename U,
+      typename =
+          typename std::enable_if<std::is_convertible<U, T>::value>::type>
   static SkipListNode* create(
       NodeAlloc& alloc, int height, U&& data, bool isHead = false) {
     DCHECK(height >= 1 && height < 64) << height;
@@ -60,27 +64,26 @@ class SkipListNode : private boost::noncopyable {
       height * sizeof(std::atomic<SkipListNode*>);
     auto* node = static_cast<SkipListNode*>(alloc.allocate(size));
     // do placement new
-    new (node) SkipListNode(height, std::forward<U>(data), isHead);
+    new (node) SkipListNode(uint8_t(height), std::forward<U>(data), isHead);
     return node;
   }
 
-  template<typename NodeAlloc>
+  template <typename NodeAlloc>
   static void destroy(NodeAlloc& alloc, SkipListNode* node) {
     node->~SkipListNode();
     alloc.deallocate(node);
   }
 
-  template<typename NodeAlloc>
-  static constexpr bool destroyIsNoOp() {
-    return IsArenaAllocator<NodeAlloc>::value &&
-           boost::has_trivial_destructor<std::atomic<SkipListNode*>>::value;
-  }
+  template <typename NodeAlloc>
+  struct DestroyIsNoOp : std::integral_constant<bool,
+    IsArenaAllocator<NodeAlloc>::value &&
+    boost::has_trivial_destructor<SkipListNode>::value> { };
 
   // copy the head node to a new head node assuming lock acquired
   SkipListNode* copyHead(SkipListNode* node) {
     DCHECK(node != nullptr && height_ > node->height_);
     setFlags(node->getFlags());
-    for (int i = 0; i < node->height_; ++i) {
+    for (uint8_t i = 0; i < node->height_; ++i) {
       setSkip(i, node->skip(i));
     }
     return this;
@@ -119,18 +122,18 @@ class SkipListNode : private boost::noncopyable {
   bool isHeadNode() const       { return getFlags() & IS_HEAD_NODE; }
 
   void setIsHeadNode() {
-    setFlags(getFlags() | IS_HEAD_NODE);
+    setFlags(uint16_t(getFlags() | IS_HEAD_NODE));
   }
   void setFullyLinked() {
-    setFlags(getFlags() | FULLY_LINKED);
+    setFlags(uint16_t(getFlags() | FULLY_LINKED));
   }
   void setMarkedForRemoval() {
-    setFlags(getFlags() | MARKED_FOR_REMOVAL);
+    setFlags(uint16_t(getFlags() | MARKED_FOR_REMOVAL));
   }
 
  private:
   // Note! this can only be called from create() as a placement new.
-  template<typename U>
+  template <typename U>
   SkipListNode(uint8_t height, U&& data, bool isHead) :
       height_(height), data_(std::forward<U>(data)) {
     spinLock_.init();
@@ -226,15 +229,17 @@ class SkipListRandomHeight {
   size_t sizeLimitTable_[kMaxHeight];
 };
 
-template<typename NodeType, typename NodeAlloc, typename = void>
+template <typename NodeType, typename NodeAlloc, typename = void>
 class NodeRecycler;
 
-template<typename NodeType, typename NodeAlloc>
+template <typename NodeType, typename NodeAlloc>
 class NodeRecycler<NodeType, NodeAlloc, typename std::enable_if<
-  !NodeType::template destroyIsNoOp<NodeAlloc>()>::type> {
+  !NodeType::template DestroyIsNoOp<NodeAlloc>::value>::type> {
  public:
   explicit NodeRecycler(const NodeAlloc& alloc)
     : refs_(0), dirty_(false), alloc_(alloc) { lock_.init(); }
+
+  explicit NodeRecycler() : refs_(0), dirty_(false) { lock_.init(); }
 
   ~NodeRecycler() {
     CHECK_EQ(refs(), 0);
@@ -313,16 +318,16 @@ class NodeRecycler<NodeType, NodeAlloc, typename std::enable_if<
 
 // In case of arena allocator, no recycling is necessary, and it's possible
 // to save on ConcurrentSkipList size.
-template<typename NodeType, typename NodeAlloc>
+template <typename NodeType, typename NodeAlloc>
 class NodeRecycler<NodeType, NodeAlloc, typename std::enable_if<
-  NodeType::template destroyIsNoOp<NodeAlloc>()>::type> {
+  NodeType::template DestroyIsNoOp<NodeAlloc>::value>::type> {
  public:
   explicit NodeRecycler(const NodeAlloc& alloc) : alloc_(alloc) { }
 
   void addRef() { }
   void releaseRef() { }
 
-  void add(NodeType* node) { }
+  void add(NodeType* /* node */) {}
 
   NodeAlloc& alloc() { return alloc_; }
 
@@ -331,5 +336,3 @@ class NodeRecycler<NodeType, NodeAlloc, typename std::enable_if<
 };
 
 }}  // namespaces
-
-#endif  // FOLLY_CONCURRENTSKIPLIST_INL_H_

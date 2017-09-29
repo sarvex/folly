@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,19 @@
 
 namespace folly {
 
+/// folly::Duration is an alias for the best resolution we offer/work with.
+/// However, it is not intended to be used for client code - you should use a
+/// descriptive std::chrono::duration type instead. e.g. do not write this:
+///
+///   futures::sleep(Duration(1000))...
+///
+/// rather this:
+///
+///   futures::sleep(std::chrono::milliseconds(1000));
+///
+/// or this:
+///
+///   futures::sleep(std::chrono::seconds(1));
 using Duration = std::chrono::milliseconds;
 
 }

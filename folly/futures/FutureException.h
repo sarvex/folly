@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,70 +16,51 @@
 
 #pragma once
 
-#include <exception>
+#include <stdexcept>
 #include <string>
 
 namespace folly {
 
-class FutureException : public std::exception {
-
-public:
-
-  explicit FutureException(std::string message_arg)
-    : message(message_arg) {}
-
-  ~FutureException() throw(){}
-
-  virtual const char *what() const throw() {
-    return message.c_str();
-  }
-
-  bool operator==(const FutureException &other) const{
-    return other.message == this->message;
-  }
-
-  bool operator!=(const FutureException &other) const{
-    return !(*this == other);
-  }
-
-  protected:
-    std::string message;
+class FutureException : public std::logic_error {
+ public:
+  using std::logic_error::logic_error;
 };
 
 class BrokenPromise : public FutureException {
-  public:
-    explicit BrokenPromise() :
-      FutureException("Broken promise") { }
+ public:
+  explicit BrokenPromise(const std::string& type)
+      : FutureException("Broken promise for type name `" + type + '`') {}
+
+  explicit BrokenPromise(const char* type) : BrokenPromise(std::string(type)) {}
 };
 
 class NoState : public FutureException {
-  public:
-    explicit NoState() : FutureException("No state") { }
+ public:
+  NoState() : FutureException("No state") {}
 };
+
+[[noreturn]] void throwNoState();
 
 class PromiseAlreadySatisfied : public FutureException {
-  public:
-    explicit PromiseAlreadySatisfied() :
-      FutureException("Promise already satisfied") { }
+ public:
+  PromiseAlreadySatisfied() : FutureException("Promise already satisfied") {}
 };
+
+[[noreturn]] void throwPromiseAlreadySatisfied();
 
 class FutureNotReady : public FutureException {
-  public:
-    explicit FutureNotReady() :
-      FutureException("Future not ready") { }
+ public:
+  FutureNotReady() : FutureException("Future not ready") {}
 };
+
+[[noreturn]] void throwFutureNotReady();
 
 class FutureAlreadyRetrieved : public FutureException {
-  public:
-    explicit FutureAlreadyRetrieved () :
-      FutureException("Future already retrieved") { }
+ public:
+  FutureAlreadyRetrieved() : FutureException("Future already retrieved") {}
 };
 
-class UsingUninitializedTry : public FutureException {
-  public:
-    explicit UsingUninitializedTry() :
-      FutureException("Using unitialized try") { }
-};
+[[noreturn]] void throwFutureAlreadyRetrieved();
 
 class FutureCancellation : public FutureException {
  public:
@@ -91,4 +72,18 @@ class TimedOut : public FutureException {
   TimedOut() : FutureException("Timed out") {}
 };
 
+[[noreturn]] void throwTimedOut();
+
+class PredicateDoesNotObtain : public FutureException {
+ public:
+  PredicateDoesNotObtain() : FutureException("Predicate does not obtain") {}
+};
+
+[[noreturn]] void throwPredicateDoesNotObtain();
+
+struct NoFutureInSplitter : FutureException {
+  NoFutureInSplitter() : FutureException("No Future in this FutureSplitter") {}
+};
+
+[[noreturn]] void throwNoFutureInSplitter();
 }

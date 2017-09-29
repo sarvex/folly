@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,14 +36,13 @@
  * from a.
  */
 
-#ifndef FOLLY_MERGE_H_
-#define FOLLY_MERGE_H_
+#pragma once
 
 #include <algorithm>
 
 namespace folly {
 
-template<class InputIt1, class InputIt2, class OutputIt, class Compare>
+template <class InputIt1, class InputIt2, class OutputIt, class Compare>
 OutputIt merge(InputIt1 first1, InputIt1 last1,
                InputIt2 first2, InputIt2 last2,
                OutputIt d_first, Compare comp) {
@@ -62,7 +61,7 @@ OutputIt merge(InputIt1 first1, InputIt1 last1,
   return std::copy(first2, last2, d_first);
 }
 
-template<class InputIt1, class InputIt2, class OutputIt>
+template <class InputIt1, class InputIt2, class OutputIt>
 OutputIt merge(InputIt1 first1, InputIt1 last1,
                InputIt2 first2, InputIt2 last2,
                OutputIt d_first) {
@@ -82,5 +81,3 @@ OutputIt merge(InputIt1 first1, InputIt1 last1,
 }
 
 }
-
-#endif

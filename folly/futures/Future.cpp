@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,15 +13,30 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #include <folly/futures/Future.h>
-#include <folly/futures/detail/ThreadWheelTimekeeper.h>
 #include <folly/Likely.h>
+#include <folly/futures/ThreadWheelTimekeeper.h>
+
+namespace folly {
+
+// Instantiate the most common Future types to save compile time
+template class Future<Unit>;
+template class Future<bool>;
+template class Future<int>;
+template class Future<int64_t>;
+template class Future<std::string>;
+template class Future<double>;
+
+}
 
 namespace folly { namespace futures {
 
-Future<void> sleep(Duration dur, Timekeeper* tk) {
+Future<Unit> sleep(Duration dur, Timekeeper* tk) {
+  std::shared_ptr<Timekeeper> tks;
   if (LIKELY(!tk)) {
-    tk = detail::getTimekeeperSingleton();
+    tks = folly::detail::getTimekeeperSingleton();
+    tk = DCHECK_NOTNULL(tks.get());
   }
   return tk->after(dur);
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,15 +15,15 @@
  */
 
 #include <folly/Bits.h>
-#include <folly/Benchmark.h>
 
 #include <algorithm>
-#include <type_traits>
 #include <limits>
+#include <type_traits>
 #include <vector>
-#include <gtest/gtest.h>
 
-#include <gflags/gflags.h>
+#include <folly/Benchmark.h>
+#include <folly/portability/GFlags.h>
+#include <folly/portability/GTest.h>
 
 using namespace folly;
 using namespace folly::bititerator_detail;
@@ -55,7 +55,7 @@ void checkRange(INT exp, IT begin, IT end) {
   }
 }
 
-}  // namespace
+} // namespace
 
 TEST(BitIterator, Simple) {
   std::vector<int> v;

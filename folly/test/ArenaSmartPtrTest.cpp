@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,10 +18,9 @@
  * @author: Marcelo Juchem <marcelo@fb.com>
  */
 
-#include <folly/Memory.h>
 #include <folly/Arena.h>
-
-#include <gtest/gtest.h>
+#include <folly/Memory.h>
+#include <folly/portability/GTest.h>
 
 using namespace folly;
 
@@ -41,7 +40,7 @@ struct global_counter {
 
   unsigned count() const { return count_; }
 
-private:
+ private:
   unsigned count_;
 };
 
@@ -56,7 +55,7 @@ struct Foo {
     counter_.decrease();
   }
 
-private:
+ private:
   global_counter& counter_;
 };
 

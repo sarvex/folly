@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,168 +23,30 @@
 #include <type_traits>
 #include <vector>
 
-#include <folly/MoveWrapper.h>
-#include <folly/futures/Deprecated.h>
+#include <folly/Optional.h>
+#include <folly/Portability.h>
+#include <folly/Try.h>
+#include <folly/Utility.h>
 #include <folly/futures/DrivableExecutor.h>
-#include <folly/futures/Promise.h>
-#include <folly/futures/Try.h>
 #include <folly/futures/FutureException.h>
+#include <folly/futures/Promise.h>
 #include <folly/futures/detail/Types.h>
 
+// boring predeclarations and details
+#include <folly/futures/Future-pre.h>
+
+// not-boring helpers, e.g. all in folly::futures, makeFuture variants, etc.
+// Needs to be included after Future-pre.h and before Future-inl.h
+#include <folly/futures/helpers.h>
+
 namespace folly {
-
-template <class> struct Promise;
-
-template <typename T>
-struct isFuture : std::false_type {
-  typedef T Inner;
-};
-
-template <typename T>
-struct isFuture<Future<T>> : std::true_type {
-  typedef T Inner;
-};
-
-template <typename T>
-struct isTry : std::false_type {};
-
-template <typename T>
-struct isTry<Try<T>> : std::true_type {};
-
-namespace detail {
-
-template <class> struct Core;
-template <class...> struct VariadicContext;
-
-template<typename F, typename... Args>
-using resultOf = decltype(std::declval<F>()(std::declval<Args>()...));
-
-template <typename...>
-struct ArgType;
-
-template <typename Arg, typename... Args>
-struct ArgType<Arg, Args...> {
-  typedef Arg FirstArg;
-};
-
-template <>
-struct ArgType<> {
-  typedef void FirstArg;
-};
-
-template <bool isTry, typename F, typename... Args>
-struct argResult {
-  typedef resultOf<F, Args...> Result;
-};
-
-template<typename F, typename... Args>
-struct callableWith {
-    template<typename T,
-             typename = detail::resultOf<T, Args...>>
-    static constexpr std::true_type
-    check(std::nullptr_t) { return std::true_type{}; };
-
-    template<typename>
-    static constexpr std::false_type
-    check(...) { return std::false_type{}; };
-
-    typedef decltype(check<F>(nullptr)) type;
-    static constexpr bool value = type::value;
-};
-
-template<typename T, typename F>
-struct callableResult {
-  typedef typename std::conditional<
-    callableWith<F>::value,
-    detail::argResult<false, F>,
-    typename std::conditional<
-      callableWith<F, Try<T>&&>::value,
-      detail::argResult<true, F, Try<T>&&>,
-      typename std::conditional<
-        callableWith<F, Try<T>&>::value,
-        detail::argResult<true, F, Try<T>&>,
-        typename std::conditional<
-          callableWith<F, T&&>::value,
-          detail::argResult<false, F, T&&>,
-          detail::argResult<false, F, T&>>::type>::type>::type>::type Arg;
-  typedef isFuture<typename Arg::Result> ReturnsFuture;
-  typedef Future<typename ReturnsFuture::Inner> Return;
-};
-
-template<typename F>
-struct callableResult<void, F> {
-  typedef typename std::conditional<
-    callableWith<F>::value,
-    detail::argResult<false, F>,
-    typename std::conditional<
-      callableWith<F, Try<void>&&>::value,
-      detail::argResult<true, F, Try<void>&&>,
-      detail::argResult<true, F, Try<void>&>>::type>::type Arg;
-  typedef isFuture<typename Arg::Result> ReturnsFuture;
-  typedef Future<typename ReturnsFuture::Inner> Return;
-};
-
-template <typename L>
-struct Extract : Extract<decltype(&L::operator())> { };
-
-template <typename Class, typename R, typename... Args>
-struct Extract<R(Class::*)(Args...) const> {
-  typedef isFuture<R> ReturnsFuture;
-  typedef Future<typename ReturnsFuture::Inner> Return;
-  typedef typename ReturnsFuture::Inner RawReturn;
-  typedef typename ArgType<Args...>::FirstArg FirstArg;
-};
-
-template <typename Class, typename R, typename... Args>
-struct Extract<R(Class::*)(Args...)> {
-  typedef isFuture<R> ReturnsFuture;
-  typedef Future<typename ReturnsFuture::Inner> Return;
-  typedef typename ReturnsFuture::Inner RawReturn;
-  typedef typename ArgType<Args...>::FirstArg FirstArg;
-};
-
-} // detail
-
-struct Timekeeper;
-
-/// This namespace is for utility functions that would usually be static
-/// members of Future, except they don't make sense there because they don't
-/// depend on the template type (rather, on the type of their arguments in
-/// some cases). This is the least-bad naming scheme we could think of. Some
-/// of the functions herein have really-likely-to-collide names, like "map"
-/// and "sleep".
-namespace futures {
-  /// Returns a Future that will complete after the specified duration. The
-  /// Duration typedef of a `std::chrono` duration type indicates the
-  /// resolution you can expect to be meaningful (milliseconds at the time of
-  /// writing). Normally you wouldn't need to specify a Timekeeper, we will
-  /// use the global futures timekeeper (we run a thread whose job it is to
-  /// keep time for futures timeouts) but we provide the option for power
-  /// users.
-  ///
-  /// The Timekeeper thread will be lazily created the first time it is
-  /// needed. If your program never uses any timeouts or other time-based
-  /// Futures you will pay no Timekeeper thread overhead.
-  Future<void> sleep(Duration, Timekeeper* = nullptr);
-
-  /// Create a Future chain from a sequence of callbacks. i.e.
-  ///
-  ///   f.then(a).then(b).then(c);
-  ///
-  /// where f is a Future<A> and the result of the chain is a Future<Z>
-  /// becomes
-  ///
-  ///   f.then(chain<A,Z>(a, b, c));
-  // If anyone figures how to get chain to deduce A and Z, I'll buy you a drink.
-  template <class A, class Z, class... Callbacks>
-  std::function<Future<Z>(Try<A>)>
-  chain(Callbacks... fns);
-}
 
 template <class T>
 class Future {
  public:
   typedef T value_type;
+
+  static Future<T> makeEmpty(); // equivalent to moved-from
 
   // not copyable
   Future(Future const&) = delete;
@@ -192,20 +54,48 @@ class Future {
 
   // movable
   Future(Future&&) noexcept;
-  Future& operator=(Future&&);
+  Future& operator=(Future&&) noexcept;
 
-  // makeFuture
-  template <class F = T>
-  /* implicit */
-  Future(const typename std::enable_if<!std::is_void<F>::value, F>::type& val);
+  // converting move
+  template <
+      class T2,
+      typename std::enable_if<
+          !std::is_same<T, typename std::decay<T2>::type>::value &&
+              std::is_constructible<T, T2&&>::value &&
+              std::is_convertible<T2&&, T>::value,
+          int>::type = 0>
+  /* implicit */ Future(Future<T2>&&);
+  template <
+      class T2,
+      typename std::enable_if<
+          !std::is_same<T, typename std::decay<T2>::type>::value &&
+              std::is_constructible<T, T2&&>::value &&
+              !std::is_convertible<T2&&, T>::value,
+          int>::type = 0>
+  explicit Future(Future<T2>&&);
+  template <
+      class T2,
+      typename std::enable_if<
+          !std::is_same<T, typename std::decay<T2>::type>::value &&
+              std::is_constructible<T, T2&&>::value,
+          int>::type = 0>
+  Future& operator=(Future<T2>&&);
 
-  template <class F = T>
-  /* implicit */
-  Future(typename std::enable_if<!std::is_void<F>::value, F>::type&& val);
+  /// Construct a Future from a value (perfect forwarding)
+  template <class T2 = T, typename =
+            typename std::enable_if<
+              !isFuture<typename std::decay<T2>::type>::value>::type>
+  /* implicit */ Future(T2&& val);
 
-  template <class F = T,
-            typename std::enable_if<std::is_void<F>::value, int>::type = 0>
-  Future();
+  template <class T2 = T>
+  /* implicit */ Future(
+      typename std::enable_if<std::is_same<Unit, T2>::value>::type* = nullptr);
+
+  template <
+      class... Args,
+      typename std::enable_if<std::is_constructible<T, Args&&...>::value, int>::
+          type = 0>
+  explicit Future(in_place_t, Args&&... args);
 
   ~Future();
 
@@ -238,20 +128,38 @@ class Future {
   // The ref-qualifier allows for `this` to be moved out so we
   // don't get access-after-free situations in chaining.
   // https://akrzemi1.wordpress.com/2014/06/02/ref-qualifiers/
-  template <typename Executor>
-  Future<T> via(Executor* executor) &&;
+  inline Future<T> via(
+      Executor* executor,
+      int8_t priority = Executor::MID_PRI) &&;
 
   /// This variant creates a new future, where the ref-qualifier && version
   /// moves `this` out. This one is less efficient but avoids confusing users
   /// when "return f.via(x);" fails.
-  template <typename Executor>
-  Future<T> via(Executor* executor) &;
+  inline Future<T> via(
+      Executor* executor,
+      int8_t priority = Executor::MID_PRI) &;
 
   /** True when the result (or exception) is ready. */
   bool isReady() const;
 
+  /// sugar for getTry().hasValue()
+  bool hasValue();
+
+  /// sugar for getTry().hasException()
+  bool hasException();
+
   /** A reference to the Try of the value */
   Try<T>& getTry();
+
+  /// Call e->drive() repeatedly until the future is fulfilled. Examples
+  /// of DrivableExecutor include EventBase and ManualExecutor. Returns a
+  /// reference to the Try of the value.
+  Try<T>& getTryVia(DrivableExecutor* e);
+
+  /// If the promise has been fulfilled, return an Optional with the Try<T>.
+  /// Otherwise return an empty Optional.
+  /// Note that this moves the Try<T> out.
+  Optional<Try<T>> poll();
 
   /// Block until the future is fulfilled. Returns the value (moved out), or
   /// throws the exception. The future must not already have a callback.
@@ -294,14 +202,9 @@ class Future {
     value(), which may rethrow if this has captured an exception. If func
     throws, the exception will be captured in the Future that is returned.
     */
-  /* TODO n3428 and other async frameworks have something like then(scheduler,
-     Future), we might want to support a similar API which could be
-     implemented a little more efficiently than
-     f.via(executor).then(callback) */
-  template <typename F, typename R = detail::callableResult<T, F>>
-  typename R::Return then(F func) {
-    typedef typename R::Arg Arguments;
-    return thenImplementation<F, R>(std::move(func), Arguments());
+  template <typename F, typename R = futures::detail::callableResult<T, F>>
+  typename R::Return then(F&& func) {
+    return thenImplementation<F, R>(std::forward<F>(func), typename R::Arg());
   }
 
   /// Variant where func is an member function
@@ -318,9 +221,29 @@ class Future {
   Future<typename isFuture<R>::Inner>
   then(R(Caller::*func)(Args...), Caller *instance);
 
-  /// Convenience method for ignoring the value and creating a Future<void>.
+  /// Execute the callback via the given Executor. The executor doesn't stick.
+  ///
+  /// Contrast
+  ///
+  ///   f.via(x).then(b).then(c)
+  ///
+  /// with
+  ///
+  ///   f.then(x, b).then(c)
+  ///
+  /// In the former both b and c execute via x. In the latter, only b executes
+  /// via x, and c executes via the same executor (if any) that f had.
+  template <class Executor, class Arg, class... Args>
+  auto then(Executor* x, Arg&& arg, Args&&... args) {
+    auto oldX = getExecutor();
+    setExecutor(x);
+    return this->then(std::forward<Arg>(arg), std::forward<Args>(args)...)
+        .via(oldX);
+  }
+
+  /// Convenience method for ignoring the value and creating a Future<Unit>.
   /// Exceptions still propagate.
-  Future<void> then();
+  Future<Unit> then();
 
   /// Set an error callback for this Future. The callback should take a single
   /// argument of the type that you want to catch, and should return a value of
@@ -338,15 +261,35 @@ class Future {
   ///   });
   template <class F>
   typename std::enable_if<
-    !detail::Extract<F>::ReturnsFuture::value,
-    Future<T>>::type
+      !futures::detail::callableWith<F, exception_wrapper>::value &&
+          !futures::detail::callableWith<F, exception_wrapper&>::value &&
+          !futures::detail::Extract<F>::ReturnsFuture::value,
+      Future<T>>::type
   onError(F&& func);
 
   /// Overload of onError where the error callback returns a Future<T>
   template <class F>
   typename std::enable_if<
-    detail::Extract<F>::ReturnsFuture::value,
-    Future<T>>::type
+      !futures::detail::callableWith<F, exception_wrapper>::value &&
+          !futures::detail::callableWith<F, exception_wrapper&>::value &&
+          futures::detail::Extract<F>::ReturnsFuture::value,
+      Future<T>>::type
+  onError(F&& func);
+
+  /// Overload of onError that takes exception_wrapper and returns Future<T>
+  template <class F>
+  typename std::enable_if<
+      futures::detail::callableWith<F, exception_wrapper>::value &&
+          futures::detail::Extract<F>::ReturnsFuture::value,
+      Future<T>>::type
+  onError(F&& func);
+
+  /// Overload of onError that takes exception_wrapper and returns T
+  template <class F>
+  typename std::enable_if<
+      futures::detail::callableWith<F, exception_wrapper>::value &&
+          !futures::detail::Extract<F>::ReturnsFuture::value,
+      Future<T>>::type
   onError(F&& func);
 
   /// func is like std::function<void()> and is executed unconditionally, and
@@ -354,7 +297,7 @@ class Future {
   /// func shouldn't throw, but if it does it will be captured and propagated,
   /// and discard any value/exception that this Future has obtained.
   template <class F>
-  Future<T> ensure(F func);
+  Future<T> ensure(F&& func);
 
   /// Like onError, but for timeouts. example:
   ///
@@ -385,19 +328,19 @@ class Future {
   /// by then), and it is active (active by default).
   ///
   /// Inactive Futures will activate upon destruction.
-  Future<T>& activate() & {
+  FOLLY_DEPRECATED("do not use") Future<T>& activate() & {
     core_->activate();
     return *this;
   }
-  Future<T>& deactivate() & {
+  FOLLY_DEPRECATED("do not use") Future<T>& deactivate() & {
     core_->deactivate();
     return *this;
   }
-  Future<T> activate() && {
+  FOLLY_DEPRECATED("do not use") Future<T> activate() && {
     core_->activate();
     return std::move(*this);
   }
-  Future<T> deactivate() && {
+  FOLLY_DEPRECATED("do not use") Future<T> deactivate() && {
     core_->deactivate();
     return std::move(*this);
   }
@@ -409,7 +352,7 @@ class Future {
   template <class E>
   void raise(E&& exception) {
     raise(make_exception_wrapper<typename std::remove_reference<E>::type>(
-        std::move(exception)));
+        std::forward<E>(exception)));
   }
 
   /// Raise an interrupt. If the promise holder has an interrupt
@@ -468,13 +411,78 @@ class Future {
   /// exception)
   Future<bool> willEqual(Future<T>&);
 
-  typedef detail::Core<T>* corePtr;
+  /// predicate behaves like std::function<bool(T const&)>
+  /// If the predicate does not obtain with the value, the result
+  /// is a folly::PredicateDoesNotObtain exception
+  template <class F>
+  Future<T> filter(F&& predicate);
+
+  /// Like reduce, but works on a Future<std::vector<T / Try<T>>>, for example
+  /// the result of collect or collectAll
+  template <class I, class F>
+  Future<I> reduce(I&& initial, F&& func);
+
+  /// Create a Future chain from a sequence of callbacks. i.e.
+  ///
+  ///   f.then(a).then(b).then(c)
+  ///
+  /// where f is a Future<A> and the result of the chain is a Future<D>
+  /// becomes
+  ///
+  ///   f.thenMulti(a, b, c);
+  template <class Callback, class... Callbacks>
+  auto thenMulti(Callback&& fn, Callbacks&&... fns) {
+    // thenMulti with two callbacks is just then(a).thenMulti(b, ...)
+    return then(std::forward<Callback>(fn))
+        .thenMulti(std::forward<Callbacks>(fns)...);
+  }
+
+  template <class Callback>
+  auto thenMulti(Callback&& fn) {
+    // thenMulti with one callback is just a then
+    return then(std::forward<Callback>(fn));
+  }
+
+  /// Create a Future chain from a sequence of callbacks. i.e.
+  ///
+  ///   f.via(executor).then(a).then(b).then(c).via(oldExecutor)
+  ///
+  /// where f is a Future<A> and the result of the chain is a Future<D>
+  /// becomes
+  ///
+  ///   f.thenMultiWithExecutor(executor, a, b, c);
+  template <class Callback, class... Callbacks>
+  auto thenMultiWithExecutor(Executor* x, Callback&& fn, Callbacks&&... fns) {
+    // thenMultiExecutor with two callbacks is
+    // via(x).then(a).thenMulti(b, ...).via(oldX)
+    auto oldX = getExecutor();
+    setExecutor(x);
+    return then(std::forward<Callback>(fn))
+        .thenMulti(std::forward<Callbacks>(fns)...)
+        .via(oldX);
+  }
+
+  template <class Callback>
+  auto thenMultiWithExecutor(Executor* x, Callback&& fn) {
+    // thenMulti with one callback is just a then with an executor
+    return then(x, std::forward<Callback>(fn));
+  }
+
+  /// Discard a result, but propagate an exception.
+  Future<Unit> unit() {
+    return then([]{ return Unit{}; });
+  }
+
+ protected:
+  typedef futures::detail::Core<T>* corePtr;
 
   // shared core state object
   corePtr core_;
 
   explicit
   Future(corePtr obj) : core_(obj) {}
+
+  explicit Future(futures::detail::EmptyConstruct) noexcept;
 
   void detach();
 
@@ -483,138 +491,50 @@ class Future {
   friend class Promise<T>;
   template <class> friend class Future;
 
+  template <class T2>
+  friend Future<T2> makeFuture(Try<T2>&&);
+
+  /// Repeat the given future (i.e., the computation it contains)
+  /// n times.
+  ///
+  /// thunk behaves like std::function<Future<T2>(void)>
+  template <class F>
+  friend Future<Unit> times(int n, F&& thunk);
+
+  /// Carry out the computation contained in the given future if
+  /// the predicate holds.
+  ///
+  /// thunk behaves like std::function<Future<T2>(void)>
+  template <class F>
+  friend Future<Unit> when(bool p, F&& thunk);
+
+  /// Carry out the computation contained in the given future if
+  /// while the predicate continues to hold.
+  ///
+  /// thunk behaves like std::function<Future<T2>(void)>
+  ///
+  /// predicate behaves like std::function<bool(void)>
+  template <class P, class F>
+  friend Future<Unit> whileDo(P&& predicate, F&& thunk);
+
   // Variant: returns a value
   // e.g. f.then([](Try<T> t){ return t.value(); });
   template <typename F, typename R, bool isTry, typename... Args>
   typename std::enable_if<!R::ReturnsFuture::value, typename R::Return>::type
-  thenImplementation(F func, detail::argResult<isTry, F, Args...>);
+  thenImplementation(F&& func, futures::detail::argResult<isTry, F, Args...>);
 
   // Variant: returns a Future
   // e.g. f.then([](Try<T> t){ return makeFuture<T>(t); });
   template <typename F, typename R, bool isTry, typename... Args>
   typename std::enable_if<R::ReturnsFuture::value, typename R::Return>::type
-  thenImplementation(F func, detail::argResult<isTry, F, Args...>);
+  thenImplementation(F&& func, futures::detail::argResult<isTry, F, Args...>);
 
   Executor* getExecutor() { return core_->getExecutor(); }
-  void setExecutor(Executor* x) { core_->setExecutor(x); }
+  void setExecutor(Executor* x, int8_t priority = Executor::MID_PRI) {
+    core_->setExecutor(x, priority);
+  }
 };
 
-/**
-  Make a completed Future by moving in a value. e.g.
-
-    string foo = "foo";
-    auto f = makeFuture(std::move(foo));
-
-  or
-
-    auto f = makeFuture<string>("foo");
-*/
-template <class T>
-Future<typename std::decay<T>::type> makeFuture(T&& t);
-
-/** Make a completed void Future. */
-Future<void> makeFuture();
-
-/** Make a completed Future by executing a function. If the function throws
-  we capture the exception, otherwise we capture the result. */
-template <class F>
-auto makeFutureTry(
-  F&& func,
-  typename std::enable_if<
-    !std::is_reference<F>::value, bool>::type sdf = false)
-  -> Future<decltype(func())>;
-
-template <class F>
-auto makeFutureTry(
-  F const& func)
-  -> Future<decltype(func())>;
-
-/// Make a failed Future from an exception_ptr.
-/// Because the Future's type cannot be inferred you have to specify it, e.g.
-///
-///   auto f = makeFuture<string>(std::current_exception());
-template <class T>
-Future<T> makeFuture(std::exception_ptr const& e) DEPRECATED;
-
-/// Make a failed Future from an exception_wrapper.
-template <class T>
-Future<T> makeFuture(exception_wrapper ew);
-
-/** Make a Future from an exception type E that can be passed to
-  std::make_exception_ptr(). */
-template <class T, class E>
-typename std::enable_if<std::is_base_of<std::exception, E>::value,
-                        Future<T>>::type
-makeFuture(E const& e);
-
-/** Make a Future out of a Try */
-template <class T>
-Future<T> makeFuture(Try<T>&& t);
-
-/*
- * Return a new Future that will call back on the given Executor.
- * This is just syntactic sugar for makeFuture().via(executor)
- *
- * @param executor the Executor to call back on
- *
- * @returns a void Future that will call back on the given executor
- */
-template <typename Executor>
-Future<void> via(Executor* executor);
-
-/** When all the input Futures complete, the returned Future will complete.
-  Errors do not cause early termination; this Future will always succeed
-  after all its Futures have finished (whether successfully or with an
-  error).
-
-  The Futures are moved in, so your copies are invalid. If you need to
-  chain further from these Futures, use the variant with an output iterator.
-
-  This function is thread-safe for Futures running on different threads. But
-  if you are doing anything non-trivial after, you will probably want to
-  follow with `via(executor)` because it will complete in whichever thread the
-  last Future completes in.
-
-  The return type for Future<T> input is a Future<std::vector<Try<T>>>
-  */
-template <class InputIterator>
-Future<std::vector<Try<
-  typename std::iterator_traits<InputIterator>::value_type::value_type>>>
-whenAll(InputIterator first, InputIterator last);
-
-/// This version takes a varying number of Futures instead of an iterator.
-/// The return type for (Future<T1>, Future<T2>, ...) input
-/// is a Future<std::tuple<Try<T1>, Try<T2>, ...>>.
-/// The Futures are moved in, so your copies are invalid.
-template <typename... Fs>
-typename detail::VariadicContext<
-  typename std::decay<Fs>::type::value_type...>::type
-whenAll(Fs&&... fs);
-
-/** The result is a pair of the index of the first Future to complete and
-  the Try. If multiple Futures complete at the same time (or are already
-  complete when passed in), the "winner" is chosen non-deterministically.
-
-  This function is thread-safe for Futures running on different threads.
-  */
-template <class InputIterator>
-Future<std::pair<
-  size_t,
-  Try<typename std::iterator_traits<InputIterator>::value_type::value_type>>>
-whenAny(InputIterator first, InputIterator last);
-
-/** when n Futures have completed, the Future completes with a vector of
-  the index and Try of those n Futures (the indices refer to the original
-  order, but the result vector will be in an arbitrary order)
-
-  Not thread safe.
-  */
-template <class InputIterator>
-Future<std::vector<std::pair<
-  size_t,
-  Try<typename std::iterator_traits<InputIterator>::value_type::value_type>>>>
-whenN(InputIterator first, InputIterator last, size_t n);
-
-} // folly
+} // namespace folly
 
 #include <folly/futures/Future-inl.h>

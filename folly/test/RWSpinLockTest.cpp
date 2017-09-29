@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,15 +18,17 @@
 // @author xliu (xliux@fb.com)
 //
 
-#include <stdlib.h>
-#include <unistd.h>
-#include <vector>
-#include <thread>
-
-#include <gtest/gtest.h>
-#include <gflags/gflags.h>
-#include <glog/logging.h>
 #include <folly/RWSpinLock.h>
+
+#include <stdlib.h>
+#include <thread>
+#include <vector>
+
+#include <glog/logging.h>
+
+#include <folly/portability/GFlags.h>
+#include <folly/portability/GTest.h>
+#include <folly/portability/Unistd.h>
 
 DEFINE_int32(num_threads, 8, "num threads");
 
@@ -36,7 +38,7 @@ static const int kMaxReaders = 50;
 static std::atomic<bool> stopThread;
 using namespace folly;
 
-template<typename RWSpinLockT> struct RWSpinLockTest: public testing::Test {
+template <typename RWSpinLockT> struct RWSpinLockTest: public testing::Test {
   typedef RWSpinLockT RWSpinLockType;
 };
 
@@ -51,7 +53,7 @@ typedef testing::Types<RWSpinLock
 
 TYPED_TEST_CASE(RWSpinLockTest, Implementations);
 
-template<typename RWSpinLockType>
+template <typename RWSpinLockType>
 static void run(RWSpinLockType* lock) {
   int64_t reads = 0;
   int64_t writes = 0;
@@ -233,10 +235,4 @@ TEST(RWSpinLock, concurrent_holder_test) {
     << "; upgrades: " << upgrades.load(std::memory_order_acquire);
 }
 
-}
-
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
-  return RUN_ALL_TESTS();
 }

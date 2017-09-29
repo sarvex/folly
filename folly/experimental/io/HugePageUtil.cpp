@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,26 +14,14 @@
  * limitations under the License.
  */
 
-#include <sys/mman.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <unistd.h>
-
 #include <iostream>
 #include <stdexcept>
-#include <system_error>
 
-#include <gflags/gflags.h>
-
-#include <folly/File.h>
 #include <folly/Format.h>
 #include <folly/MemoryMapping.h>
-#include <folly/Portability.h>
 #include <folly/Range.h>
-#include <folly/ScopeGuard.h>
 #include <folly/experimental/io/HugePages.h>
+#include <folly/portability/GFlags.h>
 
 DEFINE_bool(cp, false, "Copy file");
 
@@ -41,9 +29,7 @@ using namespace folly;
 
 namespace {
 
-FOLLY_NORETURN void usage(const char* name);
-
-void usage(const char* name) {
+[[noreturn]] void usage(const char* name) {
   std::cerr << folly::format(
       "Usage: {0}\n"
       "         list all huge page sizes and their mount points\n"
@@ -70,16 +56,19 @@ void list() {
   }
 }
 
-}  // namespace
+} // namespace
 
-
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
   if (FLAGS_cp) {
-    if (argc != 3) usage(argv[0]);
+    if (argc != 3) {
+      usage(argv[0]);
+    }
     copy(argv[1], argv[2]);
   } else {
-    if (argc != 1) usage(argv[0]);
+    if (argc != 1) {
+      usage(argv[0]);
+    }
     list();
   }
   return 0;

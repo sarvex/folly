@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,22 @@
  */
 
 /*
+ * N.B. You most likely do _not_ want to use RWSpinLock or any other
+ * kind of spinlock.  Use SharedMutex instead.
+ *
+ * In short, spinlocks in preemptive multi-tasking operating systems
+ * have serious problems and fast mutexes like SharedMutex are almost
+ * certainly the better choice, because letting the OS scheduler put a
+ * thread to sleep is better for system responsiveness and throughput
+ * than wasting a timeslice repeatedly querying a lock held by a
+ * thread that's blocked, and you can't prevent userspace
+ * programs blocking.
+ *
+ * Spinlocks in an operating system kernel make much more sense than
+ * they do in userspace.
+ *
+ * -------------------------------------------------------------------
+ *
  * Two Read-Write spin lock implementations.
  *
  *  Ref: http://locklessinc.com/articles/locks
@@ -24,12 +40,14 @@
  *  are very compact (4/8 bytes), so are suitable for per-instance
  *  based locking, particularly when contention is not expected.
  *
- *  In most cases, RWSpinLock is a reasonable choice.  It has minimal
- *  overhead, and comparable contention performance when the number of
- *  competing threads is less than or equal to the number of logical
- *  CPUs.  Even as the number of threads gets larger, RWSpinLock can
- *  still be very competitive in READ, although it is slower on WRITE,
- *  and also inherently unfair to writers.
+ *  For a spinlock, RWSpinLock is a reasonable choice.  (See the note
+ *  about for why a spin lock is frequently a bad idea generally.)
+ *  RWSpinLock has minimal overhead, and comparable contention
+ *  performance when the number of competing threads is less than or
+ *  equal to the number of logical CPUs.  Even as the number of
+ *  threads gets larger, RWSpinLock can still be very competitive in
+ *  READ, although it is slower on WRITE, and also inherently unfair
+ *  to writers.
  *
  *  RWTicketSpinLock shows more balanced READ/WRITE performance.  If
  *  your application really needs a lot more threads, and a
@@ -63,8 +81,7 @@
  * @author Xin Liu <xliux@fb.com>
  */
 
-#ifndef FOLLY_RWSPINLOCK_H_
-#define FOLLY_RWSPINLOCK_H_
+#pragma once
 
 /*
 ========================================================================
@@ -119,29 +136,29 @@ pthread_rwlock_t Read        728698     24us       101ns     7.28ms     194us
 */
 
 #include <folly/Portability.h>
+#include <folly/portability/Asm.h>
 
-#if defined(__GNUC__) && \
-  (defined(__i386) || FOLLY_X64 || \
-   defined(ARCH_K8))
+#if defined(__GNUC__) && (defined(__i386) || FOLLY_X64 || defined(ARCH_K8))
 #define RW_SPINLOCK_USE_X86_INTRINSIC_
 #include <x86intrin.h>
+#elif defined(_MSC_VER) && defined(FOLLY_X64)
+#define RW_SPINLOCK_USE_X86_INTRINSIC_
 #else
 #undef RW_SPINLOCK_USE_X86_INTRINSIC_
 #endif
 
 // iOS doesn't define _mm_cvtsi64_si128 and friends
-#if defined(__SSE2__) && !TARGET_OS_IPHONE
+#if (FOLLY_SSE >= 2) && !FOLLY_MOBILE
 #define RW_SPINLOCK_USE_SSE_INSTRUCTIONS_
 #else
 #undef RW_SPINLOCK_USE_SSE_INSTRUCTIONS_
 #endif
 
+#include <algorithm>
 #include <atomic>
 #include <string>
-#include <algorithm>
-#include <boost/noncopyable.hpp>
+#include <thread>
 
-#include <sched.h>
 #include <glog/logging.h>
 
 #include <folly/Likely.h>
@@ -163,16 +180,19 @@ namespace folly {
  * UpgradeLockable concepts except the TimedLockable related locking/unlocking
  * interfaces.
  */
-class RWSpinLock : boost::noncopyable {
+class RWSpinLock {
   enum : int32_t { READER = 4, UPGRADED = 2, WRITER = 1 };
  public:
-  RWSpinLock() : bits_(0) {}
+  constexpr RWSpinLock() : bits_(0) {}
+
+  RWSpinLock(RWSpinLock const&) = delete;
+  RWSpinLock& operator=(RWSpinLock const&) = delete;
 
   // Lockable Concept
   void lock() {
-    int count = 0;
+    uint_fast32_t count = 0;
     while (!LIKELY(try_lock())) {
-      if (++count > 1000) sched_yield();
+      if (++count > 1000) std::this_thread::yield();
     }
   }
 
@@ -184,9 +204,9 @@ class RWSpinLock : boost::noncopyable {
 
   // SharedLockable Concept
   void lock_shared() {
-    int count = 0;
+    uint_fast32_t count = 0;
     while (!LIKELY(try_lock_shared())) {
-      if (++count > 1000) sched_yield();
+      if (++count > 1000) std::this_thread::yield();
     }
   }
 
@@ -202,9 +222,9 @@ class RWSpinLock : boost::noncopyable {
 
   // UpgradeLockable Concept
   void lock_upgrade() {
-    int count = 0;
+    uint_fast32_t count = 0;
     while (!try_lock_upgrade()) {
-      if (++count > 1000) sched_yield();
+      if (++count > 1000) std::this_thread::yield();
     }
   }
 
@@ -216,7 +236,7 @@ class RWSpinLock : boost::noncopyable {
   void unlock_upgrade_and_lock() {
     int64_t count = 0;
     while (!try_unlock_upgrade_and_lock()) {
-      if (++count > 1000) sched_yield();
+      if (++count > 1000) std::this_thread::yield();
     }
   }
 
@@ -285,7 +305,7 @@ class RWSpinLock : boost::noncopyable {
 
   class ReadHolder {
    public:
-    explicit ReadHolder(RWSpinLock* lock = nullptr) : lock_(lock) {
+    explicit ReadHolder(RWSpinLock* lock) : lock_(lock) {
       if (lock_) lock_->lock_shared();
     }
 
@@ -338,7 +358,7 @@ class RWSpinLock : boost::noncopyable {
 
   class UpgradedHolder {
    public:
-    explicit UpgradedHolder(RWSpinLock* lock = nullptr) : lock_(lock) {
+    explicit UpgradedHolder(RWSpinLock* lock) : lock_(lock) {
       if (lock_) lock_->lock_upgrade();
     }
 
@@ -387,7 +407,7 @@ class RWSpinLock : boost::noncopyable {
 
   class WriteHolder {
    public:
-    explicit WriteHolder(RWSpinLock* lock = nullptr) : lock_(lock) {
+    explicit WriteHolder(RWSpinLock* lock) : lock_(lock) {
       if (lock_) lock_->lock();
     }
 
@@ -435,12 +455,6 @@ class RWSpinLock : boost::noncopyable {
     RWSpinLock* lock_;
   };
 
-  // Synchronized<> adaptors
-  friend void acquireRead(RWSpinLock& l) { return l.lock_shared(); }
-  friend void acquireReadWrite(RWSpinLock& l) { return l.lock(); }
-  friend void releaseRead(RWSpinLock& l) { return l.unlock_shared(); }
-  friend void releaseReadWrite(RWSpinLock& l) { return l.unlock(); }
-
  private:
   std::atomic<int32_t> bits_;
 };
@@ -463,13 +477,14 @@ struct RWTicketIntTrait<64> {
 
 #ifdef RW_SPINLOCK_USE_SSE_INSTRUCTIONS_
   static __m128i make128(const uint16_t v[4]) {
-    return _mm_set_epi16(0, 0, 0, 0, v[3], v[2], v[1], v[0]);
+    return _mm_set_epi16(0, 0, 0, 0,
+        short(v[3]), short(v[2]), short(v[1]), short(v[0]));
   }
   static inline __m128i fromInteger(uint64_t from) {
-    return _mm_cvtsi64_si128(from);
+    return _mm_cvtsi64_si128(int64_t(from));
   }
   static inline uint64_t toInteger(__m128i in) {
-    return _mm_cvtsi128_si64(in);
+    return uint64_t(_mm_cvtsi128_si64(in));
   }
   static inline uint64_t addParallel(__m128i in, __m128i kDelta) {
     return toInteger(_mm_add_epi16(in, kDelta));
@@ -485,25 +500,27 @@ struct RWTicketIntTrait<32> {
 
 #ifdef RW_SPINLOCK_USE_SSE_INSTRUCTIONS_
   static __m128i make128(const uint8_t v[4]) {
-    return _mm_set_epi8(0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, v[3], v[2], v[1], v[0]);
+    return _mm_set_epi8(
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        char(v[3]), char(v[2]), char(v[1]), char(v[0]));
   }
   static inline __m128i fromInteger(uint32_t from) {
-    return _mm_cvtsi32_si128(from);
+    return _mm_cvtsi32_si128(int32_t(from));
   }
   static inline uint32_t toInteger(__m128i in) {
-    return _mm_cvtsi128_si32(in);
+    return uint32_t(_mm_cvtsi128_si32(in));
   }
   static inline uint32_t addParallel(__m128i in, __m128i kDelta) {
     return toInteger(_mm_add_epi8(in, kDelta));
   }
 #endif
 };
-}  // detail
+} // namespace detail
 
-
-template<size_t kBitWidth, bool kFavorWriter=false>
-class RWTicketSpinLockT : boost::noncopyable {
+template <size_t kBitWidth, bool kFavorWriter = false>
+class RWTicketSpinLockT {
   typedef detail::RWTicketIntTrait<kBitWidth> IntTraitType;
   typedef typename detail::RWTicketIntTrait<kBitWidth>::FullInt FullInt;
   typedef typename detail::RWTicketIntTrait<kBitWidth>::HalfInt HalfInt;
@@ -511,6 +528,7 @@ class RWTicketSpinLockT : boost::noncopyable {
     QuarterInt;
 
   union RWTicket {
+    constexpr RWTicket() : whole(0) {}
     FullInt whole;
     HalfInt readWrite;
     __extension__ struct {
@@ -521,23 +539,24 @@ class RWTicketSpinLockT : boost::noncopyable {
   } ticket;
 
  private: // Some x64-specific utilities for atomic access to ticket.
-  template<class T> static T load_acquire(T* addr) {
+  template <class T> static T load_acquire(T* addr) {
     T t = *addr; // acquire barrier
-    asm volatile("" : : : "memory");
+    asm_volatile_memory();
     return t;
   }
 
-  template<class T>
+  template <class T>
   static void store_release(T* addr, T v) {
-    asm volatile("" : : : "memory");
+    asm_volatile_memory();
     *addr = v; // release barrier
   }
 
  public:
 
-  RWTicketSpinLockT() {
-    store_release(&ticket.whole, FullInt(0));
-  }
+  constexpr RWTicketSpinLockT() {}
+
+  RWTicketSpinLockT(RWTicketSpinLockT const&) = delete;
+  RWTicketSpinLockT& operator=(RWTicketSpinLockT const&) = delete;
 
   void lock() {
     if (kFavorWriter) {
@@ -579,16 +598,16 @@ class RWTicketSpinLockT : boost::noncopyable {
    * turns.
    */
   void writeLockAggressive() {
-    // sched_yield() is needed here to avoid a pathology if the number
+    // std::this_thread::yield() is needed here to avoid a pathology if the number
     // of threads attempting concurrent writes is >= the number of real
     // cores allocated to this process. This is less likely than the
     // corresponding situation in lock_shared(), but we still want to
     // avoid it
-    int count = 0;
+    uint_fast32_t count = 0;
     QuarterInt val = __sync_fetch_and_add(&ticket.users, 1);
     while (val != load_acquire(&ticket.write)) {
-      asm volatile("pause");
-      if (UNLIKELY(++count > 1000)) sched_yield();
+      asm_volatile_pause();
+      if (UNLIKELY(++count > 1000)) std::this_thread::yield();
     }
   }
 
@@ -601,7 +620,7 @@ class RWTicketSpinLockT : boost::noncopyable {
     // there are a lot of competing readers.  The aggressive spinning
     // can help to avoid starving writers.
     //
-    // We don't worry about sched_yield() here because the caller
+    // We don't worry about std::this_thread::yield() here because the caller
     // has already explicitly abandoned fairness.
     while (!try_lock()) {}
   }
@@ -631,13 +650,13 @@ class RWTicketSpinLockT : boost::noncopyable {
   }
 
   void lock_shared() {
-    // sched_yield() is important here because we can't grab the
+    // std::this_thread::yield() is important here because we can't grab the
     // shared lock if there is a pending writeLockAggressive, so we
     // need to let threads that already have a shared lock complete
-    int count = 0;
+    uint_fast32_t count = 0;
     while (!LIKELY(try_lock_shared())) {
-      asm volatile("pause");
-      if (UNLIKELY((++count & 1023) == 0)) sched_yield();
+      asm_volatile_pause();
+      if (UNLIKELY((++count & 1023) == 0)) std::this_thread::yield();
     }
   }
 
@@ -659,16 +678,18 @@ class RWTicketSpinLockT : boost::noncopyable {
   }
 
   void unlock_shared() {
-    QuarterInt val = __sync_fetch_and_add(&ticket.write, 1);
+    __sync_fetch_and_add(&ticket.write, 1);
   }
 
   class WriteHolder;
 
   typedef RWTicketSpinLockT<kBitWidth, kFavorWriter> RWSpinLock;
-  class ReadHolder : boost::noncopyable {
+  class ReadHolder {
    public:
-    explicit ReadHolder(RWSpinLock *lock = nullptr) :
-      lock_(lock) {
+    ReadHolder(ReadHolder const&) = delete;
+    ReadHolder& operator=(ReadHolder const&) = delete;
+
+    explicit ReadHolder(RWSpinLock* lock) : lock_(lock) {
       if (lock_) lock_->lock_shared();
     }
 
@@ -702,9 +723,12 @@ class RWTicketSpinLockT : boost::noncopyable {
     RWSpinLock *lock_;
   };
 
-  class WriteHolder : boost::noncopyable {
+  class WriteHolder {
    public:
-    explicit WriteHolder(RWSpinLock *lock = nullptr) : lock_(lock) {
+    WriteHolder(WriteHolder const&) = delete;
+    WriteHolder& operator=(WriteHolder const&) = delete;
+
+    explicit WriteHolder(RWSpinLock* lock) : lock_(lock) {
       if (lock_) lock_->lock();
     }
     explicit WriteHolder(RWSpinLock &lock) : lock_ (&lock) {
@@ -730,25 +754,6 @@ class RWTicketSpinLockT : boost::noncopyable {
     friend class ReadHolder;
     RWSpinLock *lock_;
   };
-
-  // Synchronized<> adaptors.
-  friend void acquireRead(RWTicketSpinLockT& mutex) {
-    mutex.lock_shared();
-  }
-  friend void acquireReadWrite(RWTicketSpinLockT& mutex) {
-    mutex.lock();
-  }
-  friend bool acquireReadWrite(RWTicketSpinLockT& mutex,
-                               unsigned int milliseconds) {
-    mutex.lock();
-    return true;
-  }
-  friend void releaseRead(RWTicketSpinLockT& mutex) {
-    mutex.unlock_shared();
-  }
-  friend void releaseReadWrite(RWTicketSpinLockT& mutex) {
-    mutex.unlock();
-  }
 };
 
 typedef RWTicketSpinLockT<32> RWTicketSpinLock32;
@@ -756,10 +761,8 @@ typedef RWTicketSpinLockT<64> RWTicketSpinLock64;
 
 #endif  // RW_SPINLOCK_USE_X86_INTRINSIC_
 
-}  // namespace folly
+} // namespace folly
 
 #ifdef RW_SPINLOCK_USE_X86_INTRINSIC_
 #undef RW_SPINLOCK_USE_X86_INTRINSIC_
 #endif
-
-#endif  // FOLLY_RWSPINLOCK_H_

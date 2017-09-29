@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,18 +14,18 @@
  * limitations under the License.
  */
 
-
 #include <folly/experimental/symbolizer/Elf.h>
 
 #include <stdio.h>
 
-#include <gflags/gflags.h>
 #include <glog/logging.h>
+
+#include <folly/portability/GFlags.h>
 
 using namespace folly;
 using namespace folly::symbolizer;
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
   CHECK_GE(argc, 2);
 
@@ -33,9 +33,7 @@ int main(int argc, char *argv[]) {
 
   if (argc > 2) {
     auto section = elf.getSectionByName(argv[2]);
-    printf("Section %s: %s\n",
-           argv[2],
-           (section ? "found" : "not found"));
+    printf("Section %s: %s\n", argv[2], (section ? "found" : "not found"));
   }
 
   auto sym = elf.getDefinitionByAddress(reinterpret_cast<uintptr_t>(main));

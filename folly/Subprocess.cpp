@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,12 +24,9 @@
 #include <sys/prctl.h>
 #endif
 #include <fcntl.h>
-#include <poll.h>
 
-#include <unistd.h>
-
-#include <array>
 #include <algorithm>
+#include <array>
 #include <system_error>
 
 #include <boost/container/flat_set.hpp>
@@ -37,26 +34,49 @@
 
 #include <glog/logging.h>
 
+#include <folly/Assume.h>
 #include <folly/Conv.h>
 #include <folly/Exception.h>
 #include <folly/ScopeGuard.h>
+#include <folly/Shell.h>
 #include <folly/String.h>
 #include <folly/io/Cursor.h>
-
-extern char** environ;
+#include <folly/portability/Sockets.h>
+#include <folly/portability/Stdlib.h>
+#include <folly/portability/SysSyscall.h>
+#include <folly/portability/Unistd.h>
 
 constexpr int kExecFailure = 127;
 constexpr int kChildFailure = 126;
 
 namespace folly {
 
+ProcessReturnCode ProcessReturnCode::make(int status) {
+  if (!WIFEXITED(status) && !WIFSIGNALED(status)) {
+    throw std::runtime_error(
+        to<std::string>("Invalid ProcessReturnCode: ", status));
+  }
+  return ProcessReturnCode(status);
+}
+
+ProcessReturnCode::ProcessReturnCode(ProcessReturnCode&& p) noexcept
+  : rawStatus_(p.rawStatus_) {
+  p.rawStatus_ = ProcessReturnCode::RV_NOT_STARTED;
+}
+
+ProcessReturnCode& ProcessReturnCode::operator=(ProcessReturnCode&& p)
+    noexcept {
+  rawStatus_ = p.rawStatus_;
+  p.rawStatus_ = ProcessReturnCode::RV_NOT_STARTED;
+  return *this;
+}
+
 ProcessReturnCode::State ProcessReturnCode::state() const {
   if (rawStatus_ == RV_NOT_STARTED) return NOT_STARTED;
   if (rawStatus_ == RV_RUNNING) return RUNNING;
   if (WIFEXITED(rawStatus_)) return EXITED;
   if (WIFSIGNALED(rawStatus_)) return KILLED;
-  throw std::runtime_error(to<std::string>(
-      "Invalid ProcessReturnCode: ", rawStatus_));
+  assume_unreachable();
 }
 
 void ProcessReturnCode::enforce(State expected) const {
@@ -95,23 +115,28 @@ std::string ProcessReturnCode::str() const {
     return to<std::string>("killed by signal ", killSignal(),
                            (coreDumped() ? " (core dumped)" : ""));
   }
-  CHECK(false);  // unreached
+  assume_unreachable();
 }
 
 CalledProcessError::CalledProcessError(ProcessReturnCode rc)
-  : returnCode_(rc),
-    what_(returnCode_.str()) {
+    : SubprocessError(rc.str()), returnCode_(rc) {}
+
+static inline std::string toSubprocessSpawnErrorMessage(
+    char const* executable,
+    int errCode,
+    int errnoValue) {
+  auto prefix = errCode == kExecFailure ? "failed to execute "
+                                        : "error preparing to execute ";
+  return to<std::string>(prefix, executable, ": ", errnoStr(errnoValue));
 }
 
-SubprocessSpawnError::SubprocessSpawnError(const char* executable,
-                                           int errCode,
-                                           int errnoValue)
-  : errnoValue_(errnoValue),
-    what_(to<std::string>(errCode == kExecFailure ?
-                            "failed to execute " :
-                            "error preparing to execute ",
-                          executable, ": ", errnoStr(errnoValue))) {
-}
+SubprocessSpawnError::SubprocessSpawnError(
+    const char* executable,
+    int errCode,
+    int errnoValue)
+    : SubprocessError(
+          toSubprocessSpawnErrorMessage(executable, errCode, errnoValue)),
+      errnoValue_(errnoValue) {}
 
 namespace {
 
@@ -133,7 +158,7 @@ void checkStatus(ProcessReturnCode returnCode) {
   }
 }
 
-}  // namespace
+} // namespace
 
 Subprocess::Options& Subprocess::Options::fd(int fd, int action) {
   if (action == Subprocess::PIPE) {
@@ -150,13 +175,13 @@ Subprocess::Options& Subprocess::Options::fd(int fd, int action) {
   return *this;
 }
 
+Subprocess::Subprocess() {}
+
 Subprocess::Subprocess(
     const std::vector<std::string>& argv,
     const Options& options,
     const char* executable,
-    const std::vector<std::string>* env)
-  : pid_(-1),
-    returnCode_(RV_NOT_STARTED) {
+    const std::vector<std::string>* env) {
   if (argv.empty()) {
     throw std::invalid_argument("argv must not be empty");
   }
@@ -167,43 +192,28 @@ Subprocess::Subprocess(
 Subprocess::Subprocess(
     const std::string& cmd,
     const Options& options,
-    const std::vector<std::string>* env)
-  : pid_(-1),
-    returnCode_(RV_NOT_STARTED) {
+    const std::vector<std::string>* env) {
   if (options.usePath_) {
     throw std::invalid_argument("usePath() not allowed when running in shell");
   }
-  const char* shell = getenv("SHELL");
-  if (!shell) {
-    shell = "/bin/sh";
-  }
 
-  std::unique_ptr<const char*[]> argv(new const char*[4]);
-  argv[0] = shell;
-  argv[1] = "-c";
-  argv[2] = cmd.c_str();
-  argv[3] = nullptr;
-  spawn(std::move(argv), shell, options, env);
+  std::vector<std::string> argv = {"/bin/sh", "-c", cmd};
+  spawn(cloneStrings(argv), argv[0].c_str(), options, env);
 }
 
 Subprocess::~Subprocess() {
   CHECK_NE(returnCode_.state(), ProcessReturnCode::RUNNING)
     << "Subprocess destroyed without reaping child";
-  closeAll();
 }
 
 namespace {
-void closeChecked(int fd) {
-  checkUnixError(::close(fd), "close");
-}
 
 struct ChildErrorInfo {
   int errCode;
   int errnoValue;
 };
 
-FOLLY_NORETURN void childError(int errFd, int errCode, int errnoValue);
-void childError(int errFd, int errCode, int errnoValue) {
+[[noreturn]] void childError(int errFd, int errCode, int errnoValue) {
   ChildErrorInfo info = {errCode, errnoValue};
   // Write the error information over the pipe to our parent process.
   // We can't really do anything else if this write call fails.
@@ -212,18 +222,11 @@ void childError(int errFd, int errCode, int errnoValue) {
   _exit(errCode);
 }
 
-}  // namespace
-
-void Subprocess::closeAll() {
-  for (auto& p : pipes_) {
-    closeChecked(p.parentFd);
-  }
-  pipes_.clear();
-}
+} // namespace
 
 void Subprocess::setAllNonBlocking() {
   for (auto& p : pipes_) {
-    int fd = p.parentFd;
+    int fd = p.pipe.fd();
     int flags = ::fcntl(fd, F_GETFL);
     checkUnixError(flags, "fcntl");
     int r = ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
@@ -244,12 +247,8 @@ void Subprocess::spawn(
   // Make a copy, we'll mutate options
   Options options(optionsIn);
 
-  // On error, close all of the pipes_
-  auto pipesGuard = makeGuard([&] {
-    for (auto& p : this->pipes_) {
-      CHECK_ERR(::close(p.parentFd));
-    }
-  });
+  // On error, close all pipes_ (ignoring errors, but that seems fine here).
+  auto pipesGuard = makeGuard([this] { pipes_.clear(); });
 
   // Create a pipe to use to receive error information from the child,
   // in case it fails before calling exec()
@@ -325,6 +324,9 @@ void Subprocess::spawnInternal(
       // doesn't need to reset the flag on its end, as we always dup2() the fd,
       // and dup2() fds don't share the close-on-exec flag.
 #if FOLLY_HAVE_PIPE2
+      // If possible, set close-on-exec atomically. Otherwise, a concurrent
+      // Subprocess invocation can fork() between "pipe" and "fnctl",
+      // causing FDs to leak.
       r = ::pipe2(fds, O_CLOEXEC);
       checkUnixError(r, "pipe2");
 #else
@@ -335,21 +337,21 @@ void Subprocess::spawnInternal(
       r = fcntl(fds[1], F_SETFD, FD_CLOEXEC);
       checkUnixError(r, "set FD_CLOEXEC");
 #endif
-      PipeInfo pinfo;
-      pinfo.direction = p.second;
+      pipes_.emplace_back();
+      Pipe& pipe = pipes_.back();
+      pipe.direction = p.second;
       int cfd;
       if (p.second == PIPE_IN) {
         // Child gets reading end
-        pinfo.parentFd = fds[1];
+        pipe.pipe = folly::File(fds[1], /*owns_fd=*/ true);
         cfd = fds[0];
       } else {
-        pinfo.parentFd = fds[0];
+        pipe.pipe = folly::File(fds[0], /*owns_fd=*/ true);
         cfd = fds[1];
       }
       p.second = cfd;  // ensure it gets dup2()ed
-      pinfo.childFd = p.first;
+      pipe.childFd = p.first;
       childFds.push_back(cfd);
-      pipes_.push_back(pinfo);
     }
   }
 
@@ -400,7 +402,19 @@ void Subprocess::spawnInternal(
   // Call c_str() here, as it's not necessarily safe after fork.
   const char* childDir =
     options.childDir_.empty() ? nullptr : options.childDir_.c_str();
-  pid_t pid = vfork();
+
+  pid_t pid;
+#ifdef __linux__
+  if (options.cloneFlags_) {
+    pid = syscall(SYS_clone, *options.cloneFlags_, 0, nullptr, nullptr);
+    checkUnixError(pid, errno, "clone");
+  } else {
+#endif
+    pid = vfork();
+    checkUnixError(pid, errno, "vfork");
+#ifdef __linux__
+  }
+#endif
   if (pid == 0) {
     int errnoValue = prepareChild(options, &oldSignals, childDir);
     if (errnoValue != 0) {
@@ -411,8 +425,6 @@ void Subprocess::spawnInternal(
     // If we get here, exec() failed.
     childError(errFd, kExecFailure, errnoValue);
   }
-  // In parent.  Make sure vfork() succeeded.
-  checkUnixError(pid, errno, "vfork");
 
   // Child is alive.  We have to be very careful about throwing after this
   // point.  We are inside the constructor, so if we throw the Subprocess
@@ -422,7 +434,7 @@ void Subprocess::spawnInternal(
   // child has exited and can be immediately waited for.  In all other cases,
   // we have no way of cleaning up the child.
   pid_ = pid;
-  returnCode_ = ProcessReturnCode(RV_RUNNING);
+  returnCode_ = ProcessReturnCode::makeRunning();
 }
 
 int Subprocess::prepareChild(const Options& options,
@@ -480,7 +492,9 @@ int Subprocess::prepareChild(const Options& options,
 #if __linux__
   // Opt to receive signal on parent death, if requested
   if (options.parentDeathSignal_ != 0) {
-    if (prctl(PR_SET_PDEATHSIG, options.parentDeathSignal_, 0, 0, 0) == -1) {
+    const auto parentDeathSignal =
+        static_cast<unsigned long>(options.parentDeathSignal_);
+    if (prctl(PR_SET_PDEATHSIG, parentDeathSignal, 0, 0, 0) == -1) {
       return errno;
     }
   }
@@ -489,6 +503,13 @@ int Subprocess::prepareChild(const Options& options,
   if (options.processGroupLeader_) {
     if (setpgrp() == -1) {
       return errno;
+    }
+  }
+
+  // The user callback comes last, so that the child is otherwise all set up.
+  if (options.dangerousPostForkPreExecCallback_) {
+    if (int error = (*options.dangerousPostForkPreExecCallback_)()) {
+      return error;
     }
   }
 
@@ -536,14 +557,19 @@ void Subprocess::readChildErrorPipe(int pfd, const char* executable) {
   throw SubprocessSpawnError(executable, info.errCode, info.errnoValue);
 }
 
-ProcessReturnCode Subprocess::poll() {
+ProcessReturnCode Subprocess::poll(struct rusage* ru) {
   returnCode_.enforce(ProcessReturnCode::RUNNING);
   DCHECK_GT(pid_, 0);
   int status;
-  pid_t found = ::waitpid(pid_, &status, WNOHANG);
-  checkUnixError(found, "waitpid");
+  pid_t found = ::wait4(pid_, &status, WNOHANG, ru);
+  // The spec guarantees that EINTR does not occur with WNOHANG, so the only
+  // two remaining errors are ECHILD (other code reaped the child?), or
+  // EINVAL (cosmic rays?), both of which merit an abort:
+  PCHECK(found != -1) << "waitpid(" << pid_ << ", &status, WNOHANG)";
   if (found != 0) {
-    returnCode_ = ProcessReturnCode(status);
+    // Though the child process had quit, this call does not close the pipes
+    // since its descendants may still be using them.
+    returnCode_ = ProcessReturnCode::make(status);
     pid_ = -1;
   }
   return returnCode_;
@@ -565,9 +591,13 @@ ProcessReturnCode Subprocess::wait() {
   do {
     found = ::waitpid(pid_, &status, 0);
   } while (found == -1 && errno == EINTR);
-  checkUnixError(found, "waitpid");
+  // The only two remaining errors are ECHILD (other code reaped the
+  // child?), or EINVAL (cosmic rays?), and both merit an abort:
+  PCHECK(found != -1) << "waitpid(" << pid_ << ", &status, WNOHANG)";
+  // Though the child process had quit, this call does not close the pipes
+  // since its descendants may still be using them.
   DCHECK_EQ(found, pid_);
-  returnCode_ = ProcessReturnCode(status);
+  returnCode_ = ProcessReturnCode::make(status);
   pid_ = -1;
   return returnCode_;
 }
@@ -589,21 +619,23 @@ pid_t Subprocess::pid() const {
 
 namespace {
 
-std::pair<const uint8_t*, size_t> queueFront(const IOBufQueue& queue) {
+ByteRange queueFront(const IOBufQueue& queue) {
   auto* p = queue.front();
-  if (!p) return std::make_pair(nullptr, 0);
-  return io::Cursor(p).peek();
+  if (!p) {
+    return ByteRange{};
+  }
+  return io::Cursor(p).peekBytes();
 }
 
 // fd write
 bool handleWrite(int fd, IOBufQueue& queue) {
   for (;;) {
-    auto p = queueFront(queue);
-    if (p.second == 0) {
+    auto b = queueFront(queue);
+    if (b.empty()) {
       return true;  // EOF
     }
 
-    ssize_t n = writeNoInt(fd, p.first, p.second);
+    ssize_t n = writeNoInt(fd, b.data(), b.size());
     if (n == -1 && errno == EAGAIN) {
       return false;
     }
@@ -645,7 +677,7 @@ bool discardRead(int fd) {
   }
 }
 
-}  // namespace
+} // namespace
 
 std::pair<std::string, std::string> Subprocess::communicate(
     StringPiece input) {
@@ -709,12 +741,14 @@ std::pair<IOBufQueue, IOBufQueue> Subprocess::communicateIOBuf(
 
 void Subprocess::communicate(FdCallback readCallback,
                              FdCallback writeCallback) {
+  // This serves to prevent wait() followed by communicate(), but if you
+  // legitimately need that, send a patch to delete this line.
   returnCode_.enforce(ProcessReturnCode::RUNNING);
   setAllNonBlocking();
 
   std::vector<pollfd> fds;
   fds.reserve(pipes_.size());
-  std::vector<int> toClose;
+  std::vector<size_t> toClose;  // indexes into pipes_
   toClose.reserve(pipes_.size());
 
   while (!pipes_.empty()) {
@@ -723,7 +757,7 @@ void Subprocess::communicate(FdCallback readCallback,
 
     for (auto& p : pipes_) {
       pollfd pfd;
-      pfd.fd = p.parentFd;
+      pfd.fd = p.pipe.fd();
       // Yes, backwards, PIPE_IN / PIPE_OUT are defined from the
       // child's point of view.
       if (!p.enabled) {
@@ -746,13 +780,14 @@ void Subprocess::communicate(FdCallback readCallback,
 
     for (size_t i = 0; i < pipes_.size(); ++i) {
       auto& p = pipes_[i];
-      DCHECK_EQ(fds[i].fd, p.parentFd);
+      auto parentFd = p.pipe.fd();
+      DCHECK_EQ(fds[i].fd, parentFd);
       short events = fds[i].revents;
 
       bool closed = false;
       if (events & POLLOUT) {
         DCHECK(!(events & POLLIN));
-        if (writeCallback(p.parentFd, p.childFd)) {
+        if (writeCallback(parentFd, p.childFd)) {
           toClose.push_back(i);
           closed = true;
         }
@@ -762,7 +797,7 @@ void Subprocess::communicate(FdCallback readCallback,
       // on) end of file
       if (events & (POLLIN | POLLHUP)) {
         DCHECK(!(events & POLLOUT));
-        if (readCallback(p.parentFd, p.childFd)) {
+        if (readCallback(parentFd, p.childFd)) {
           toClose.push_back(i);
           closed = true;
         }
@@ -777,7 +812,7 @@ void Subprocess::communicate(FdCallback readCallback,
     // Close the fds in reverse order so the indexes hold after erase()
     for (int idx : boost::adaptors::reverse(toClose)) {
       auto pos = pipes_.begin() + idx;
-      closeChecked(pos->parentFd);
+      pos->pipe.close();  // Throws on error
       pipes_.erase(pos);
     }
   }
@@ -791,10 +826,10 @@ bool Subprocess::notificationsEnabled(int childFd) const {
   return pipes_[findByChildFd(childFd)].enabled;
 }
 
-int Subprocess::findByChildFd(int childFd) const {
+size_t Subprocess::findByChildFd(int childFd) const {
   auto pos = std::lower_bound(
       pipes_.begin(), pipes_.end(), childFd,
-      [] (const PipeInfo& info, int fd) { return info.childFd < fd; });
+      [] (const Pipe& pipe, int fd) { return pipe.childFd < fd; });
   if (pos == pipes_.end() || pos->childFd != childFd) {
     throw std::invalid_argument(folly::to<std::string>(
         "child fd not found ", childFd));
@@ -804,8 +839,18 @@ int Subprocess::findByChildFd(int childFd) const {
 
 void Subprocess::closeParentFd(int childFd) {
   int idx = findByChildFd(childFd);
-  closeChecked(pipes_[idx].parentFd);
+  pipes_[idx].pipe.close();  // May throw
   pipes_.erase(pipes_.begin() + idx);
+}
+
+std::vector<Subprocess::ChildPipe> Subprocess::takeOwnershipOfPipes() {
+  std::vector<Subprocess::ChildPipe> pipes;
+  for (auto& p : pipes_) {
+    pipes.emplace_back(p.childFd, std::move(p.pipe));
+  }
+  // release memory
+  std::vector<Pipe>().swap(pipes_);
+  return pipes;
 }
 
 namespace {
@@ -820,6 +865,6 @@ class Initializer {
 
 Initializer initializer;
 
-}  // namespace
+} // namespace
 
-}  // namespace folly
+} // namespace folly

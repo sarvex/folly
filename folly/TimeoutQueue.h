@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,15 +25,15 @@
  * @author Tudor Bosman (tudorb@fb.com)
  */
 
-#ifndef FOLLY_TIMEOUTQUEUE_H_
-#define FOLLY_TIMEOUTQUEUE_H_
+#pragma once
 
-#include <stdint.h>
+#include <cstdint>
 #include <functional>
-#include <boost/multi_index_container.hpp>
+
 #include <boost/multi_index/indexed_by.hpp>
-#include <boost/multi_index/ordered_index.hpp>
 #include <boost/multi_index/member.hpp>
+#include <boost/multi_index/ordered_index.hpp>
+#include <boost/multi_index_container.hpp>
 
 namespace folly {
 
@@ -126,6 +126,4 @@ class TimeoutQueue {
   Id nextId_;
 };
 
-}  // namespace folly
-
-#endif /* FOLLY_TIMEOUTQUEUE_H_ */
+} // namespace folly

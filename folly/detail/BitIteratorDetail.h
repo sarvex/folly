@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,11 +14,11 @@
  * limitations under the License.
  */
 
-#ifndef FOLLY_DETAIL_BITITERATORDETAIL_H_
-#define FOLLY_DETAIL_BITITERATORDETAIL_H_
+#pragma once
 
 #include <iterator>
 #include <type_traits>
+
 #include <boost/iterator/iterator_adaptor.hpp>
 
 namespace folly {
@@ -85,8 +85,5 @@ struct BitIteratorBase {
     ssize_t> type;
 };
 
-
-}  // namespace bititerator_detail
-}  // namespace folly
-
-#endif /* FOLLY_DETAIL_BITITERATORDETAIL_H_ */
+} // namespace bititerator_detail
+} // namespace folly

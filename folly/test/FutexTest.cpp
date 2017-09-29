@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,10 +22,10 @@
 #include <ratio>
 #include <thread>
 
-#include <gflags/gflags.h>
 #include <glog/logging.h>
-#include <gtest/gtest.h>
-#include <time.h>
+
+#include <folly/portability/GTest.h>
+#include <folly/portability/Time.h>
 
 using namespace folly::detail;
 using namespace folly::test;
@@ -34,13 +34,13 @@ using namespace std::chrono;
 
 typedef DeterministicSchedule DSched;
 
-template <template<typename> class Atom>
+template <template <typename> class Atom>
 void run_basic_thread(
     Futex<Atom>& f) {
   EXPECT_TRUE(f.futexWait(0));
 }
 
-template <template<typename> class Atom>
+template <template <typename> class Atom>
 void run_basic_tests() {
   Futex<Atom> f(0);
 
@@ -56,7 +56,7 @@ void run_basic_tests() {
   DSched::join(thr);
 }
 
-template <template<typename> class Atom, typename Clock, typename Duration>
+template <template <typename> class Atom, typename Clock, typename Duration>
 void liveClockWaitUntilTests() {
   Futex<Atom> f(0);
 
@@ -113,7 +113,7 @@ void deterministicAtomicWaitUntilTests() {
   EXPECT_TRUE(res == FutexResult::TIMEDOUT || res == FutexResult::INTERRUPTED);
 }
 
-template<template<typename> class Atom>
+template <template <typename> class Atom>
 void run_wait_until_tests() {
   liveClockWaitUntilTests<Atom, system_clock, system_clock::duration>();
   liveClockWaitUntilTests<Atom, steady_clock, steady_clock::duration>();
@@ -182,6 +182,23 @@ void run_steady_clock_test() {
   EXPECT_TRUE(A <= B && B <= C);
 }
 
+template <template <typename> class Atom>
+void run_wake_blocked_test() {
+  for (auto delay = std::chrono::milliseconds(1);; delay *= 2) {
+    bool success = false;
+    Futex<Atom> f(0);
+    auto thr = DSched::thread([&] { success = f.futexWait(0); });
+    /* sleep override */ std::this_thread::sleep_for(delay);
+    f.store(1);
+    f.futexWake(1);
+    DSched::join(thr);
+    LOG(INFO) << "delay=" << delay.count() << "_ms, success=" << success;
+    if (success) {
+      break;
+    }
+  }
+}
+
 TEST(Futex, clock_source) {
   run_system_clock_test();
 
@@ -208,8 +225,10 @@ TEST(Futex, basic_deterministic) {
   run_wait_until_tests<DeterministicAtomic>();
 }
 
-int main(int argc, char ** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
-  return RUN_ALL_TESTS();
+TEST(Futex, wake_blocked_live) {
+  run_wake_blocked_test<std::atomic>();
+}
+
+TEST(Futex, wake_blocked_emulated) {
+  run_wake_blocked_test<EmulatedFutexAtomic>();
 }

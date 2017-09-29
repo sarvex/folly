@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,19 +14,17 @@
  * limitations under the License.
  */
 
-#include <folly/io/async/AsyncUDPSocket.h>
-#include <folly/io/async/AsyncUDPServerSocket.h>
-#include <folly/io/async/AsyncTimeout.h>
-#include <folly/io/async/EventBase.h>
 #include <folly/SocketAddress.h>
-
-#include <boost/thread/barrier.hpp>
+#include <folly/io/async/AsyncTimeout.h>
+#include <folly/io/async/AsyncUDPServerSocket.h>
+#include <folly/io/async/AsyncUDPSocket.h>
+#include <folly/io/async/EventBase.h>
 
 #include <folly/io/IOBuf.h>
+#include <folly/portability/GMock.h>
+#include <folly/portability/GTest.h>
 
 #include <thread>
-
-#include <gtest/gtest.h>
 
 using folly::AsyncUDPSocket;
 using folly::AsyncUDPServerSocket;
@@ -34,6 +32,7 @@ using folly::AsyncTimeout;
 using folly::EventBase;
 using folly::SocketAddress;
 using folly::IOBuf;
+using namespace testing;
 
 class UDPAcceptor
     : public AsyncUDPServerSocket::Callback {
@@ -41,15 +40,14 @@ class UDPAcceptor
   UDPAcceptor(EventBase* evb, int n): evb_(evb), n_(n) {
   }
 
-  void onListenStarted() noexcept {
-  }
+  void onListenStarted() noexcept override {}
 
-  void onListenStopped() noexcept {
-  }
+  void onListenStopped() noexcept override {}
 
-  void onDataAvailable(const folly::SocketAddress& client,
+  void onDataAvailable(std::shared_ptr<folly::AsyncUDPSocket> /* socket */,
+                       const folly::SocketAddress& client,
                        std::unique_ptr<folly::IOBuf> data,
-                       bool truncated) noexcept {
+                       bool truncated) noexcept override {
 
     lastClient_ = client;
     lastMsg_ = data->moveToFbString().toStdString();
@@ -89,9 +87,7 @@ class UDPServer {
   void start() {
     CHECK(evb_->isInEventBaseThread());
 
-    socket_ = folly::make_unique<AsyncUDPServerSocket>(
-        evb_,
-        1500);
+    socket_ = std::make_unique<AsyncUDPServerSocket>(evb_, 1500);
 
     try {
       socket_->bind(addr_);
@@ -112,11 +108,7 @@ class UDPServer {
         evb.loopForever();
       });
 
-      auto r = std::make_shared<boost::barrier>(2);
-      evb.runInEventBaseThread([r] () {
-        r->wait();
-      });
-      r->wait();
+      evb.waitUntilRunning();
 
       socket_->addListener(&evb, &acceptors_[i]);
       threads_.emplace_back(std::move(t));
@@ -167,7 +159,7 @@ class UDPClient
     CHECK(evb_->isInEventBaseThread());
 
     server_ = server;
-    socket_ = folly::make_unique<AsyncUDPSocket>(evb_);
+    socket_ = std::make_unique<AsyncUDPSocket>(evb_);
 
     try {
       socket_->bind(folly::SocketAddress("127.0.0.1", 0));
@@ -205,14 +197,14 @@ class UDPClient
         folly::IOBuf::copyBuffer(folly::to<std::string>("PING ", n_)));
   }
 
-  void getReadBuffer(void** buf, size_t* len) noexcept {
+  void getReadBuffer(void** buf, size_t* len) noexcept override {
     *buf = buf_;
     *len = 1024;
   }
 
   void onDataAvailable(const folly::SocketAddress& client,
                        size_t len,
-                       bool truncated) noexcept {
+                       bool truncated) noexcept override {
     VLOG(4) << "Read " << len << " bytes (trun:" << truncated << ") from "
               << client.describe() << " - " << std::string(buf_, len);
     VLOG(4) << n_ << " left";
@@ -222,18 +214,18 @@ class UDPClient
     sendPing();
   }
 
-  void onReadError(const folly::AsyncSocketException& ex) noexcept {
+  void onReadError(const folly::AsyncSocketException& ex) noexcept override {
     VLOG(4) << ex.what();
 
     // Start listening for next PONG
     socket_->resumeRead(this);
   }
 
-  void onReadClosed() noexcept {
+  void onReadClosed() noexcept override {
     CHECK(false) << "We unregister reads before closing";
   }
 
-  void timeoutExpired() noexcept {
+  void timeoutExpired() noexcept override {
     VLOG(4) << "Timeout expired";
     sendPing();
   }
@@ -257,7 +249,6 @@ class UDPClient
 TEST(AsyncSocketTest, PingPong) {
   folly::EventBase sevb;
   UDPServer server(&sevb, folly::SocketAddress("127.0.0.1", 0), 4);
-  boost::barrier barrier(2);
 
   // Start event loop in a separate thread
   auto serverThread = std::thread([&sevb] () {
@@ -265,12 +256,10 @@ TEST(AsyncSocketTest, PingPong) {
   });
 
   // Wait for event loop to start
-  sevb.runInEventBaseThread([&] () { barrier.wait(); });
-  barrier.wait();
+  sevb.waitUntilRunning();
 
   // Start the server
-  sevb.runInEventBaseThread([&] () { server.start(); barrier.wait(); });
-  barrier.wait();
+  sevb.runInEventBaseThreadAndWait([&]() { server.start(); });
 
   folly::EventBase cevb;
   UDPClient client(&cevb);
@@ -281,8 +270,7 @@ TEST(AsyncSocketTest, PingPong) {
   });
 
   // Wait for event loop to start
-  cevb.runInEventBaseThread([&] () { barrier.wait(); });
-  barrier.wait();
+  cevb.waitUntilRunning();
 
   // Send ping
   cevb.runInEventBaseThread([&] () { client.start(server.address(), 1000); });
@@ -303,3 +291,10 @@ TEST(AsyncSocketTest, PingPong) {
   // Wait for server thread to joib
   serverThread.join();
 }
+
+class TestAsyncUDPSocket : public AsyncUDPSocket {
+ public:
+  explicit TestAsyncUDPSocket(EventBase* evb) : AsyncUDPSocket(evb) {}
+
+  MOCK_METHOD3(sendmsg, ssize_t(int, const struct msghdr*, int));
+};

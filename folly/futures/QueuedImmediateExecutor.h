@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,7 +27,13 @@ namespace folly {
  */
 class QueuedImmediateExecutor : public Executor {
  public:
-  void add(Func) override;
+  /// There's really only one queue per thread, no matter how many
+  /// QueuedImmediateExecutor objects you may have.
+  static void addStatic(Func);
+
+  void add(Func func) override {
+    addStatic(std::move(func));
+  }
 };
 
-} // folly
+} // namespace folly

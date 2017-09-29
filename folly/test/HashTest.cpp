@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 
 #include <folly/Hash.h>
 #include <folly/MapUtil.h>
-#include <gtest/gtest.h>
+#include <folly/portability/GTest.h>
 #include <stdint.h>
 #include <unordered_map>
 #include <utility>
@@ -38,6 +38,12 @@ TEST(Hash, Fnv32) {
   const uint32_t s3_res = 2166136261UL;
   EXPECT_EQ(fnv32(s3), s3_res);
   EXPECT_EQ(fnv32(s3), fnv32_buf(s3, strlen(s3)));
+
+  const uint8_t s4_data[] = {0xFF, 0xFF, 0xFF, 0x00};
+  const char* s4 = reinterpret_cast<const char*>(s4_data);
+  const uint32_t s4_res = 2420936562UL;
+  EXPECT_EQ(fnv32(s4), s4_res);
+  EXPECT_EQ(fnv32(s4), fnv32_buf(s4, strlen(s4)));
 }
 
 TEST(Hash, Fnv64) {
@@ -55,6 +61,12 @@ TEST(Hash, Fnv64) {
   const uint64_t s3_res = 14695981039346656037ULL;
   EXPECT_EQ(fnv64(s3), s3_res);
   EXPECT_EQ(fnv64(s3), fnv64_buf(s3, strlen(s3)));
+
+  const uint8_t s4_data[] = {0xFF, 0xFF, 0xFF, 0x00};
+  const char* s4 = reinterpret_cast<const char*>(s4_data);
+  const uint64_t s4_res = 2787597222566293202ULL;
+  EXPECT_EQ(fnv64(s4), s4_res);
+  EXPECT_EQ(fnv64(s4), fnv64_buf(s4, strlen(s4)));
 
   // note: Use fnv64_buf to make a single hash value from multiple
   // fields/datatypes.
@@ -117,14 +129,14 @@ void checkTWang(uint64_t r) {
   uint64_t result = twang_mix64(r);
   EXPECT_EQ(r, twang_unmix64(result));
 }
-}  // namespace
+} // namespace
 
 TEST(Hash, TWang_Unmix64) {
   // We'll try (1 << i), (1 << i) + 1, (1 << i) - 1
   for (int i = 1; i < 64; i++) {
-    checkTWang((1U << i) - 1);
-    checkTWang(1U << i);
-    checkTWang((1U << i) + 1);
+    checkTWang((uint64_t(1) << i) - 1);
+    checkTWang(uint64_t(1) << i);
+    checkTWang((uint64_t(1) << i) + 1);
   }
 }
 
@@ -155,7 +167,7 @@ void checkJenkins(uint32_t r) {
   uint32_t result = jenkins_rev_mix32(r);
   EXPECT_EQ(r, jenkins_rev_unmix32(result));
 }
-}  // namespace
+} // namespace
 
 TEST(Hash, Jenkins_Rev_Unmix32) {
   // We'll try (1 << i), (1 << i) + 1, (1 << i) - 1
@@ -229,11 +241,84 @@ TEST(Hash, hash_combine) {
   EXPECT_NE(hash_combine(1, 2), hash_combine(2, 1));
 }
 
+TEST(Hash, hash_bool) {
+  const auto hash = folly::Hash();
+  EXPECT_NE(hash(true), hash(false));
+}
+
+TEST(Hash, hash_bool10) {
+  const auto hash = folly::Hash();
+  std::set<size_t> values;
+  for (bool b1 : {false, true}) {
+    for (bool b2 : {false, true}) {
+      for (bool b3 : {false, true}) {
+        for (bool b4 : {false, true}) {
+          for (bool b5 : {false, true}) {
+            for (bool b6 : {false, true}) {
+              for (bool b7 : {false, true}) {
+                for (bool b8 : {false, true}) {
+                  for (bool b9 : {false, true}) {
+                    for (bool b10 : {false, true}) {
+                      values.insert(
+                          hash(b1, b2, b3, b4, b5, b6, b7, b8, b9, b10));
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  EXPECT_EQ(values.size(), 1 << 10);
+}
+
 TEST(Hash, std_tuple) {
   typedef std::tuple<int64_t, std::string, int32_t> tuple3;
   tuple3 t(42, "foo", 1);
 
   std::unordered_map<tuple3, std::string> m;
+  m[t] = "bar";
+  EXPECT_EQ("bar", m[t]);
+}
+
+TEST(Hash, enum_type) {
+  const auto hash = folly::Hash();
+
+  enum class Enum32 : int32_t { Foo, Bar };
+  EXPECT_EQ(hash(static_cast<int32_t>(Enum32::Foo)), hash(Enum32::Foo));
+  EXPECT_EQ(hash(static_cast<int32_t>(Enum32::Bar)), hash(Enum32::Bar));
+  EXPECT_NE(hash(Enum32::Foo), hash(Enum32::Bar));
+
+  std::unordered_map<Enum32, std::string, folly::Hash> m32;
+  m32[Enum32::Foo] = "foo";
+  EXPECT_EQ("foo", m32[Enum32::Foo]);
+
+  enum class Enum64 : int64_t { Foo, Bar };
+  EXPECT_EQ(hash(static_cast<int64_t>(Enum64::Foo)), hash(Enum64::Foo));
+  EXPECT_EQ(hash(static_cast<int64_t>(Enum64::Bar)), hash(Enum64::Bar));
+  EXPECT_NE(hash(Enum64::Foo), hash(Enum64::Bar));
+
+  std::unordered_map<Enum64, std::string, folly::Hash> m64;
+  m64[Enum64::Foo] = "foo";
+  EXPECT_EQ("foo", m64[Enum64::Foo]);
+}
+
+TEST(Hash, pair_folly_hash) {
+  typedef std::pair<int64_t, int32_t> pair2;
+  pair2 p(42, 1);
+
+  std::unordered_map<pair2, std::string, folly::Hash> m;
+  m[p] = "bar";
+  EXPECT_EQ("bar", m[p]);
+}
+
+TEST(Hash, tuple_folly_hash) {
+  typedef std::tuple<int64_t, int32_t, int32_t> tuple3;
+  tuple3 t(42, 1, 1);
+
+  std::unordered_map<tuple3, std::string, folly::Hash> m;
   m[t] = "bar";
   EXPECT_EQ("bar", m[t]);
 }
@@ -262,3 +347,74 @@ TEST(Hash, std_tuple_different_hash) {
   EXPECT_NE(std::hash<tuple3>()(t1),
             std::hash<tuple3>()(t3));
 }
+
+TEST(Hash, Strings) {
+  using namespace folly;
+
+  StringPiece a1 = "10050517", b1 = "51107032",
+              a2 = "10050518", b2 = "51107033",
+              a3 = "10050519", b3 = "51107034",
+              a4 = "10050525", b4 = "51107040";
+  Range<const wchar_t*> w1 = range(L"10050517"), w2 = range(L"51107032"),
+                        w3 = range(L"10050518"), w4 = range(L"51107033");
+  Hash h2;
+  EXPECT_NE(h2(a1), h2(b1));
+  EXPECT_NE(h2(a1), h2(b1));
+  EXPECT_NE(h2(a2), h2(b2));
+  EXPECT_NE(h2(a3), h2(b3));
+  EXPECT_NE(h2(ByteRange(a1)), h2(ByteRange(b1)));
+  EXPECT_NE(h2(ByteRange(a2)), h2(ByteRange(b2)));
+  EXPECT_NE(h2(ByteRange(a3)), h2(ByteRange(b3)));
+  EXPECT_NE(h2(ByteRange(a4)), h2(ByteRange(b4)));
+  EXPECT_NE(h2(w1), h2(w2));
+  EXPECT_NE(h2(w1), h2(w3));
+  EXPECT_NE(h2(w2), h2(w4));
+
+  // Check compatibility with std::string.
+  EXPECT_EQ(h2(a1), h2(a1.str()));
+  EXPECT_EQ(h2(a2), h2(a2.str()));
+  EXPECT_EQ(h2(a3), h2(a3.str()));
+  EXPECT_EQ(h2(a4), h2(a4.str()));
+}
+
+struct FNVTestParam {
+  std::string in;
+  uint64_t out;
+};
+
+class FNVTest : public ::testing::TestWithParam<FNVTestParam> {};
+
+TEST_P(FNVTest, Fnva64Buf) {
+  EXPECT_EQ(GetParam().out,
+            fnva64_buf(GetParam().in.data(), GetParam().in.size()));
+}
+
+TEST_P(FNVTest, Fnva64) {
+  EXPECT_EQ(GetParam().out, fnva64(GetParam().in));
+}
+
+TEST_P(FNVTest, Fnva64Partial) {
+  size_t partialLen = GetParam().in.size() / 2;
+  auto data = GetParam().in.data();
+  auto partial = fnva64_buf(data, partialLen);
+  EXPECT_EQ(GetParam().out,
+            fnva64_buf(
+                data + partialLen, GetParam().in.size() - partialLen, partial));
+}
+
+// Taken from http://www.isthe.com/chongo/src/fnv/test_fnv.c
+INSTANTIATE_TEST_CASE_P(
+    FNVTesting,
+    FNVTest,
+    ::testing::Values(
+        (FNVTestParam){"foobar", // 11
+                       0x85944171f73967e8},
+        (FNVTestParam){"chongo was here!\n", // 39
+                       0x46810940eff5f915},
+        (FNVTestParam){"127.0.0.3", // 106,
+                       0xaabafc7104d91158},
+        (FNVTestParam){
+            "http://en.wikipedia.org/wiki/Fowler_Noll_Vo_hash", // 126
+            0xd9b957fb7fe794c5},
+        (FNVTestParam){"http://norvig.com/21-days.html", // 136
+                       0x07aaa640476e0b9a}));

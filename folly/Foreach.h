@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,103 +14,197 @@
  * limitations under the License.
  */
 
-#ifndef FOLLY_BASE_FOREACH_H_
-#define FOLLY_BASE_FOREACH_H_
+#pragma once
 
-/*
- * Iterim macros (until we have C++0x range-based for) that simplify
- * writing loops of the form
- *
- * for (Container<data>::iterator i = c.begin(); i != c.end(); ++i) statement
- *
- * Just replace the above with:
- *
- * FOR_EACH (i, c) statement
- *
- * and everything is taken care of.
- *
- * The implementation is a bit convoluted to make sure the container is
- * only evaluated once (however, keep in mind that c.end() is evaluated
- * at every pass through the loop). To ensure the container is not
- * evaluated multiple times, the macro defines one do-nothing if
- * statement to inject the Boolean variable FOR_EACH_state1, and then a
- * for statement that is executed only once, which defines the variable
- * FOR_EACH_state2 holding a rvalue reference to the container being
- * iterated. The workhorse is the last loop, which uses the just defined
- * rvalue reference FOR_EACH_state2.
- *
- * The state variables are nested so they don't interfere; you can use
- * FOR_EACH multiple times in the same scope, either at the same level or
- * nested.
- *
- * In optimized builds g++ eliminates the extra gymnastics entirely and
- * generates code 100% identical to the handwritten loop.
- */
+#include <folly/Portability.h>
+#include <folly/Preprocessor.h>
 
 #include <type_traits>
 
-/*
- * Shorthand for:
- *   for (auto i = c.begin(); i != c.end(); ++i)
- * except that c is only evaluated once.
- */
-#define FOR_EACH(i, c)                              \
-  if (bool FOR_EACH_state1 = false) {} else         \
-    for (auto && FOR_EACH_state2 = (c);             \
-         !FOR_EACH_state1; FOR_EACH_state1 = true)  \
-      for (auto i = FOR_EACH_state2.begin();        \
-           i != FOR_EACH_state2.end(); ++i)
-
-/*
- * Similar to FOR_EACH, but iterates the container backwards by
- * using rbegin() and rend().
- */
-#define FOR_EACH_R(i, c)                                \
-  if (bool FOR_EACH_R_state1 = false) {} else           \
-    for (auto && FOR_EACH_R_state2 = (c);               \
-         !FOR_EACH_R_state1; FOR_EACH_R_state1 = true)  \
-      for (auto i = FOR_EACH_R_state2.rbegin();         \
-           i != FOR_EACH_R_state2.rend(); ++i)
-
-/*
- * Similar to FOR_EACH but also allows client to specify a 'count' variable
- * to track the current iteration in the loop (starting at zero).
- * Similar to python's enumerate() function.  For example:
- * string commaSeparatedValues = "VALUES: ";
- * FOR_EACH_ENUMERATE(ii, value, columns) {   // don't want comma at the end!
- *   commaSeparatedValues += (ii == 0) ? *value : string(",") + *value;
- * }
- */
-#define FOR_EACH_ENUMERATE(count, i, c)                                \
-  if (bool FOR_EACH_state1 = false) {} else                            \
-    for (auto && FOR_EACH_state2 = (c);                                \
-         !FOR_EACH_state1; FOR_EACH_state1 = true)                     \
-      if (size_t FOR_EACH_privateCount = 0) {} else                    \
-        if (const size_t& count = FOR_EACH_privateCount) {} else       \
-          for (auto i = FOR_EACH_state2.begin();                       \
-               i != FOR_EACH_state2.end(); ++FOR_EACH_privateCount, ++i)
+namespace folly {
 
 /**
- * Similar to FOR_EACH, but gives the user the key and value for each entry in
- * the container, instead of just the iterator to the entry. For example:
- *   map<string, string> testMap;
- *   FOR_EACH_KV(key, value, testMap) {
- *      cout << key << " " << value;
- *   }
+ * @function for_each
+ *
+ * folly::for_each is a generalized iteration algorithm.  Example:
+ *
+ *  auto one = std::make_tuple(1, 2, 3);
+ *  auto two = std::vector<int>{1, 2, 3};
+ *  auto func = [](auto element, auto index) {
+ *    cout << index << " : " << element << endl;
+ *  };
+ *  folly::for_each(one, func);
+ *  folly::for_each(two, func);
+ *
+ * The for_each function allows iteration through sequences, these
+ * can either be runtime sequences (i.e. entities for which std::begin and
+ * std::end work) or compile time sequences (as deemed by the presence of
+ * std::tuple_length<>, get<> (ADL resolved) functions)
+ *
+ * The function is made to provide a convenient library based alternative to
+ * the proposal p0589r0, which aims to generalize the range based for loop
+ * even further to work with compile time sequences.
+ *
+ * A drawback of using range based for loops is that sometimes you do not have
+ * access to the index within the range.  This provides easy access to that,
+ * even with compile time sequences.
+ *
+ * And breaking out is easy
+ *
+ *  auto range_one = std::vector<int>{1, 2, 3};
+ *  auto range_two = std::make_tuple(1, 2, 3);
+ *  auto func = [](auto ele, auto index) {
+ *    cout << "Element at index " << index << " : " << ele;
+ *    if (index == 1) {
+ *      return folly::loop_break;
+ *    }
+ *    return folly::loop_continue;
+ *  };
+ *  folly_for_each(range_one, func);
+ *  folly_for_each(range_two, func);
+ *
+ * A simple use case would be when using futures, if the user was doing calls
+ * to n servers then they would accept the callback with the futures like this
+ *
+ *  auto vec = std::vector<std::future<int>>{request_one(), ...};
+ *  when_all(vec.begin(), vec.end()).then([](auto futures) {
+ *    folly::for_each(futures, [](auto& fut) { ... });
+ *  });
+ *
+ * Now when this code switches to use tuples instead of the runtime
+ * std::vector, then the loop does not need to change, the code will still
+ * work just fine
+ *
+ *  when_all(future_one, future_two, future_three).then([](auto futures) {
+ *    folly::for_each(futures, [](auto& fut) { ... });
+ *  });
  */
-#define FOR_EACH_KV(k, v, c)                                    \
-  if (unsigned int FOR_EACH_state1 = 0) {} else                 \
-    for (auto && FOR_EACH_state2 = (c);                         \
-         !FOR_EACH_state1; FOR_EACH_state1 = 1)                 \
-      for (auto FOR_EACH_state3 = FOR_EACH_state2.begin();      \
-           FOR_EACH_state3 != FOR_EACH_state2.end();            \
-           FOR_EACH_state1 == 2                                 \
-             ? ((FOR_EACH_state1 = 0), ++FOR_EACH_state3)       \
-             : (FOR_EACH_state3 = FOR_EACH_state2.end()))       \
-        for (auto &k = FOR_EACH_state3->first;                  \
-             !FOR_EACH_state1; ++FOR_EACH_state1)               \
-          for (auto &v = FOR_EACH_state3->second;               \
-               !FOR_EACH_state1; ++FOR_EACH_state1)
+template <typename Range, typename Func>
+FOLLY_CPP14_CONSTEXPR Func for_each(Range&& range, Func func);
+
+/**
+ * The user should return loop_break and loop_continue if they want to iterate
+ * in such a way that they can preemptively stop the loop and break out when
+ * certain conditions are met
+ */
+namespace for_each_detail {
+enum class LoopControl : bool { BREAK, CONTINUE };
+} // namespace for_each_detail
+
+constexpr auto loop_break = for_each_detail::LoopControl::BREAK;
+constexpr auto loop_continue = for_each_detail::LoopControl::CONTINUE;
+
+/**
+ * Utility method to help access elements of a sequence with one uniform
+ * interface
+ *
+ * This can be useful for example when you are looping through a sequence and
+ * want to modify another sequence based on the information in the current
+ * sequence
+ *
+ *  auto range_one = std::make_tuple(1, 2, 3);
+ *  auto range_two = std::make_tuple(4, 5, 6);
+ *  folly::for_each(range_one, [&range_two](auto ele, auto index) {
+ *    folly::fetch(range_two, index) = ele;
+ *  });
+ *
+ * For non-tuple like ranges, this works by first trying to use the iterator
+ * class if the iterator has been marked to be a random access iterator.  This
+ * should be inspectable via the std::iterator_traits traits class.  If the
+ * iterator class is not present or is not a random access iterator then the
+ * implementation falls back to trying to use the indexing operator
+ * (operator[]) to fetch the required element
+ */
+template <typename Sequence, typename Index>
+FOLLY_CPP14_CONSTEXPR decltype(auto) fetch(Sequence&& sequence, Index&& index);
+
+} // namespace folly
+
+/**
+ * Everything below this is deprecated.  Use the folly::for_each algorithm above
+ * instead
+ */
+/*
+ * Form a local variable name from "FOR_EACH_" x __LINE__, so that
+ * FOR_EACH can be nested without creating shadowed declarations.
+ */
+#define _FE_ANON(x) FB_CONCATENATE(FOR_EACH_, FB_CONCATENATE(x, __LINE__))
+
+/*
+ * If you just want the element values, please use:
+ *
+ *    for (auto&& element : collection)
+ *
+ * If you need access to the iterators please write an explicit iterator loop
+ */
+#define FOR_EACH(i, c)                                  \
+  if (bool _FE_ANON(s1_) = false) {} else               \
+    for (auto && _FE_ANON(s2_) = (c);                   \
+         !_FE_ANON(s1_); _FE_ANON(s1_) = true)          \
+      for (auto i = _FE_ANON(s2_).begin();              \
+           i != _FE_ANON(s2_).end(); ++i)
+
+/*
+ * If you just want the element values, please use this (ranges-v3) construct:
+ *
+ *    for (auto&& element : collection | view::reverse)
+ *
+ * If you need access to the iterators please write an explicit iterator loop
+ */
+#define FOR_EACH_R(i, c)                                \
+  if (bool _FE_ANON(s1_) = false) {} else               \
+    for (auto && _FE_ANON(s2_) = (c);                   \
+         !_FE_ANON(s1_); _FE_ANON(s1_) = true)          \
+      for (auto i = _FE_ANON(s2_).rbegin();             \
+           i != _FE_ANON(s2_).rend(); ++i)
+
+/*
+ * If you just want the element values, please use this (ranges-v3) construct:
+ *
+ *    for (auto&& element : collection | view::zip(view::ints))
+ *
+ * If you need access to the iterators please write an explicit iterator loop
+ * and use a counter variable
+ */
+#define FOR_EACH_ENUMERATE(count, i, c)                                \
+  if (bool _FE_ANON(s1_) = false) {} else                            \
+    for (auto && FOR_EACH_state2 = (c);                                \
+         !_FE_ANON(s1_); _FE_ANON(s1_) = true)                     \
+      if (size_t _FE_ANON(n1_) = 0) {} else                            \
+        if (const size_t& count = _FE_ANON(n1_)) {} else               \
+          for (auto i = FOR_EACH_state2.begin();                       \
+               i != FOR_EACH_state2.end(); ++_FE_ANON(n1_), ++i)
+/**
+ * If you just want the keys, please use this (ranges-v3) construct:
+ *
+ *    for (auto&& element : collection | view::keys)
+ *
+ * If you just want the values, please use this (ranges-v3) construct:
+ *
+ *    for (auto&& element : collection | view::values)
+ *
+ * If you need to see both, use:
+ *
+ *    for (auto&& element : collection) {
+ *      auto const& key = element.first;
+ *      auto& value = element.second;
+ *      ......
+ *    }
+ *
+ */
+#define FOR_EACH_KV(k, v, c)                                  \
+  if (unsigned int _FE_ANON(s1_) = 0) {} else                 \
+    for (auto && _FE_ANON(s2_) = (c);                         \
+         !_FE_ANON(s1_); _FE_ANON(s1_) = 1)                   \
+      for (auto _FE_ANON(s3_) = _FE_ANON(s2_).begin();        \
+           _FE_ANON(s3_) != _FE_ANON(s2_).end();              \
+           _FE_ANON(s1_) == 2                                 \
+             ? ((_FE_ANON(s1_) = 0), ++_FE_ANON(s3_))         \
+             : (_FE_ANON(s3_) = _FE_ANON(s2_).end()))         \
+        for (auto &k = _FE_ANON(s3_)->first;                  \
+             !_FE_ANON(s1_); ++_FE_ANON(s1_))                 \
+          for (auto &v = _FE_ANON(s3_)->second;               \
+               !_FE_ANON(s1_); ++_FE_ANON(s1_))
 
 namespace folly { namespace detail {
 
@@ -120,7 +214,8 @@ class HasLess {
   struct BiggerThanChar { char unused[2]; };
   template <typename C, typename D> static char test(decltype(C() < D())*);
   template <typename, typename> static BiggerThanChar test(...);
-public:
+
+ public:
   enum { value = sizeof(test<T, U>(0)) == 1 };
 };
 
@@ -204,12 +299,10 @@ downTo(T& iter, const U& begin) {
 } }
 
 /*
- * Iteration with given limits. end is assumed to be reachable from
- * begin. end is evaluated every pass through the loop.
+ * Look at the Ranges-v3 views and you'll probably find an easier way to build
+ * the view you want but the equivalent is roughly:
  *
- * NOTE: The type of the loop variable should be the common type of "begin"
- *       and "end". e.g. If "begin" is "int" but "end" is "long", we want "i"
- *       to be "long". This is done by getting the type of (true ? begin : end)
+ *    for (auto& element : make_iterator_range(begin, end))
  */
 #define FOR_EACH_RANGE(i, begin, end)           \
   for (auto i = (true ? (begin) : (end));       \
@@ -217,15 +310,12 @@ downTo(T& iter, const U& begin) {
        ++i)
 
 /*
- * Iteration with given limits. begin is assumed to be reachable from
- * end by successive decrements. begin is evaluated every pass through
- * the loop.
+ * Look at the Ranges-v3 views and you'll probably find an easier way to build
+ * the view you want but the equivalent is roughly:
  *
- * NOTE: The type of the loop variable should be the common type of "begin"
- *       and "end". e.g. If "begin" is "int" but "end" is "long", we want "i"
- *       to be "long". This is done by getting the type of (false ? begin : end)
+ *    for (auto& element : make_iterator_range(begin, end) | view::reverse)
  */
 #define FOR_EACH_RANGE_R(i, begin, end) \
   for (auto i = (false ? (begin) : (end)); ::folly::detail::downTo(i, (begin));)
 
-#endif
+#include <folly/Foreach-inl.h>

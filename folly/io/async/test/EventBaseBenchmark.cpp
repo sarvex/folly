@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,8 +16,7 @@
 
 #include <folly/Benchmark.h>
 #include <folly/io/async/EventBase.h>
-
-#include <gflags/gflags.h>
+#include <folly/portability/GFlags.h>
 
 using namespace folly;
 
@@ -27,7 +26,7 @@ class CountedLoopCallback : public EventBase::LoopCallback {
     : eventBase_(eventBase)
     , count_(count) {}
 
-  virtual void runLoopCallback() noexcept {
+  void runLoopCallback() noexcept override {
     --count_;
     if (count_ > 0) {
       eventBase_->runInLoop(this);

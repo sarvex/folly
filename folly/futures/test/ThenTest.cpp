@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,13 +14,14 @@
  * limitations under the License.
  */
 
-#include <gtest/gtest.h>
-#include <thread>
-
 #include <folly/futures/Future.h>
+#include <folly/portability/GTest.h>
+
+#include <thread>
 
 using namespace folly;
 
+namespace {
 struct Widget {
   int v_, copied_, moved_;
   /* implicit */ Widget(int v) : v_(v), copied_(0), moved_(0) {}
@@ -28,11 +29,14 @@ struct Widget {
     : v_(other.v_), copied_(other.copied_ + 1), moved_(other.moved_) {}
   Widget(Widget&& other) noexcept
     : v_(other.v_), copied_(other.copied_), moved_(other.moved_ + 1) {}
-  Widget& operator=(const Widget& other)
-    { throw std::logic_error("unexpected copy assignment"); }
-  Widget& operator=(Widget&& other)
-    { throw std::logic_error("unexpected move assignment"); }
+  Widget& operator=(const Widget& /* other */) {
+    throw std::logic_error("unexpected copy assignment");
+  }
+  Widget& operator=(Widget&& /* other */) {
+    throw std::logic_error("unexpected move assignment");
+  }
 };
+}
 
 TEST(Then, tryConstructor) {
   auto t = Try<Widget>(23);
@@ -48,7 +52,7 @@ TEST(Then, makeFuture) {
   EXPECT_EQ(future.value().moved_, 2);
 }
 
-TEST(Then, TryConstRValueReference) {
+TEST(Then, tryConstRValueReference) {
   auto future = makeFuture<Widget>(23).then(
     [](const Try<Widget>&& t) {
       EXPECT_EQ(t.value().copied_, 0);
@@ -58,7 +62,7 @@ TEST(Then, TryConstRValueReference) {
   EXPECT_EQ(future.value(), 23);
 }
 
-TEST(Then, TryRValueReference) {
+TEST(Then, tryRValueReference) {
   auto future = makeFuture<Widget>(23).then(
     [](Try<Widget>&& t) {
       EXPECT_EQ(t.value().copied_, 0);
@@ -68,7 +72,7 @@ TEST(Then, TryRValueReference) {
   EXPECT_EQ(future.value(), 23);
 }
 
-TEST(Then, TryLValueReference) {
+TEST(Then, tryLValueReference) {
   auto future = makeFuture<Widget>(23).then(
     [](Try<Widget>& t) {
       EXPECT_EQ(t.value().copied_, 0);
@@ -78,7 +82,7 @@ TEST(Then, TryLValueReference) {
   EXPECT_EQ(future.value(), 23);
 }
 
-TEST(Then, TryConstLValueReference) {
+TEST(Then, tryConstLValueReference) {
   auto future = makeFuture<Widget>(23).then(
     [](const Try<Widget>& t) {
       EXPECT_EQ(t.value().copied_, 0);
@@ -88,7 +92,7 @@ TEST(Then, TryConstLValueReference) {
   EXPECT_EQ(future.value(), 23);
 }
 
-TEST(Then, TryValue) {
+TEST(Then, tryValue) {
   auto future = makeFuture<Widget>(23).then(
     [](Try<Widget> t) {
       EXPECT_EQ(t.value().copied_, 0);
@@ -98,7 +102,7 @@ TEST(Then, TryValue) {
   EXPECT_EQ(future.value(), 23);
 }
 
-TEST(Then, TryConstValue) {
+TEST(Then, tryConstValue) {
   auto future = makeFuture<Widget>(23).then(
     [](const Try<Widget> t) {
       EXPECT_EQ(t.value().copied_, 0);
@@ -108,7 +112,7 @@ TEST(Then, TryConstValue) {
   EXPECT_EQ(future.value(), 23);
 }
 
-TEST(Then, ConstRValueReference) {
+TEST(Then, constRValueReference) {
   auto future = makeFuture<Widget>(23).then(
     [](const Widget&& w) {
       EXPECT_EQ(w.copied_, 0);
@@ -118,7 +122,7 @@ TEST(Then, ConstRValueReference) {
   EXPECT_EQ(future.value(), 23);
 }
 
-TEST(Then, RValueReference) {
+TEST(Then, rValueReference) {
   auto future = makeFuture<Widget>(23).then(
     [](Widget&& w) {
       EXPECT_EQ(w.copied_, 0);
@@ -128,7 +132,7 @@ TEST(Then, RValueReference) {
   EXPECT_EQ(future.value(), 23);
 }
 
-TEST(Then, LValueReference) {
+TEST(Then, lValueReference) {
   auto future = makeFuture<Widget>(23).then(
     [](Widget& w) {
       EXPECT_EQ(w.copied_, 0);
@@ -138,7 +142,7 @@ TEST(Then, LValueReference) {
   EXPECT_EQ(future.value(), 23);
 }
 
-TEST(Then, ConstLValueReference) {
+TEST(Then, constLValueReference) {
   auto future = makeFuture<Widget>(23).then(
     [](const Widget& w) {
       EXPECT_EQ(w.copied_, 0);
@@ -148,7 +152,7 @@ TEST(Then, ConstLValueReference) {
   EXPECT_EQ(future.value(), 23);
 }
 
-TEST(Then, Value) {
+TEST(Then, value) {
   auto future = makeFuture<Widget>(23).then(
     [](Widget w) {
       EXPECT_EQ(w.copied_, 0);
@@ -158,7 +162,7 @@ TEST(Then, Value) {
   EXPECT_EQ(future.value(), 23);
 }
 
-TEST(Then, ConstValue) {
+TEST(Then, constValue) {
   auto future = makeFuture<Widget>(23).then(
     [](const Widget w) {
       EXPECT_EQ(w.copied_, 0);
@@ -166,4 +170,10 @@ TEST(Then, ConstValue) {
       return w.v_;
     });
   EXPECT_EQ(future.value(), 23);
+}
+
+TEST(Then, voidThenShouldPropagateExceptions) {
+  EXPECT_FALSE(makeFuture(42).then().hasException());
+  EXPECT_TRUE(makeFuture<int>(std::runtime_error("err"))
+             .then().hasException());
 }

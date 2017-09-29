@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,20 +14,19 @@
  * limitations under the License.
  */
 
-
-#ifndef FOLLY_EXPERIMENTAL_EXCEPTION_TRACER_STACKTRACE_H_
-#define FOLLY_EXPERIMENTAL_EXCEPTION_TRACER_STACKTRACE_H_
+#pragma once
 
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
 
-namespace folly { namespace exception_tracer {
+namespace folly {
+namespace exception_tracer {
 
 constexpr size_t kMaxFrames = 500;
 
 struct StackTrace {
-  StackTrace() : frameCount(0) { }
+  StackTrace() : frameCount(0) {}
 
   size_t frameCount;
   uintptr_t addresses[kMaxFrames];
@@ -37,6 +36,7 @@ struct StackTrace {
 // A StackTraceStack MUST be placed in zero-initialized memory.
 class StackTraceStack {
   class Node;
+
  public:
   /**
    * Push the current stack trace onto the stack.
@@ -66,7 +66,9 @@ class StackTraceStack {
   /**
    * Is the stack empty?
    */
-  bool empty() const { return !top_; }
+  bool empty() const {
+    return !top_;
+  }
 
   /**
    * Return the top stack trace, or nullptr if the stack is empty.
@@ -96,7 +98,5 @@ class StackTraceStack {
   uintptr_t guard2_;
 #endif
 };
-
-}}  // namespaces
-
-#endif /* FOLLY_EXPERIMENTAL_EXCEPTION_TRACER_STACKTRACE_H_ */
+} // namespace exception_tracer
+} // namespace folly

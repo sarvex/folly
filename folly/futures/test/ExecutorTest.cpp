@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,16 +14,14 @@
  * limitations under the License.
  */
 
-#include <gtest/gtest.h>
+#include <folly/Baton.h>
+#include <folly/futures/Future.h>
 #include <folly/futures/InlineExecutor.h>
 #include <folly/futures/ManualExecutor.h>
 #include <folly/futures/QueuedImmediateExecutor.h>
-#include <folly/futures/Future.h>
-#include <folly/Baton.h>
+#include <folly/portability/GTest.h>
 
 using namespace folly;
-using namespace std::chrono;
-using namespace testing;
 
 TEST(ManualExecutor, runIsStable) {
   ManualExecutor x;
@@ -37,7 +35,7 @@ TEST(ManualExecutor, runIsStable) {
 TEST(ManualExecutor, scheduleDur) {
   ManualExecutor x;
   size_t count = 0;
-  milliseconds dur {10};
+  std::chrono::milliseconds dur {10};
   x.schedule([&]{ count++; }, dur);
   EXPECT_EQ(count, 0);
   x.run();
@@ -48,6 +46,49 @@ TEST(ManualExecutor, scheduleDur) {
   EXPECT_EQ(count, 1);
 }
 
+TEST(ManualExecutor, laterThingsDontBlockEarlierOnes) {
+  ManualExecutor x;
+  auto first = false;
+  std::chrono::milliseconds dur{10};
+  x.schedule([&] { first = true; }, dur);
+  x.schedule([] {}, 2 * dur);
+  EXPECT_FALSE(first);
+  x.advance(dur);
+  EXPECT_TRUE(first);
+}
+
+TEST(ManualExecutor, orderWillNotBeQuestioned) {
+  ManualExecutor x;
+  auto first = false;
+  auto second = false;
+  std::chrono::milliseconds dur{10};
+  x.schedule([&] { first = true; }, dur);
+  x.schedule([&] { second = true; }, 2 * dur);
+  EXPECT_FALSE(first);
+  EXPECT_FALSE(second);
+  x.advance(dur);
+  EXPECT_TRUE(first);
+  EXPECT_FALSE(second);
+  x.advance(dur);
+  EXPECT_TRUE(first);
+  EXPECT_TRUE(second);
+}
+
+TEST(ManualExecutor, evenWhenYouSkipAheadEventsRunInProperOrder) {
+  ManualExecutor x;
+  auto counter = 0;
+  auto first = 0;
+  auto second = 0;
+  std::chrono::milliseconds dur{10};
+  x.schedule([&] { first = ++counter; }, dur);
+  x.schedule([&] { second = ++counter; }, 2 * dur);
+  EXPECT_EQ(first, 0);
+  EXPECT_EQ(second, 0);
+  x.advance(3 * dur);
+  EXPECT_EQ(first, 1);
+  EXPECT_EQ(second, 2);
+}
+
 TEST(ManualExecutor, clockStartsAt0) {
   ManualExecutor x;
   EXPECT_EQ(x.now(), x.now().min());
@@ -56,38 +97,38 @@ TEST(ManualExecutor, clockStartsAt0) {
 TEST(ManualExecutor, scheduleAbs) {
   ManualExecutor x;
   size_t count = 0;
-  x.scheduleAt([&]{ count++; }, x.now() + milliseconds(10));
+  x.scheduleAt([&]{ count++; }, x.now() + std::chrono::milliseconds(10));
   EXPECT_EQ(count, 0);
-  x.advance(milliseconds(10));
+  x.advance(std::chrono::milliseconds(10));
   EXPECT_EQ(count, 1);
 }
 
 TEST(ManualExecutor, advanceTo) {
   ManualExecutor x;
   size_t count = 0;
-  x.scheduleAt([&]{ count++; }, steady_clock::now());
+  x.scheduleAt([&]{ count++; }, std::chrono::steady_clock::now());
   EXPECT_EQ(count, 0);
-  x.advanceTo(steady_clock::now());
+  x.advanceTo(std::chrono::steady_clock::now());
   EXPECT_EQ(count, 1);
 }
 
 TEST(ManualExecutor, advanceBack) {
   ManualExecutor x;
   size_t count = 0;
-  x.advance(microseconds(5));
-  x.schedule([&]{ count++; }, microseconds(6));
+  x.advance(std::chrono::microseconds(5));
+  x.schedule([&]{ count++; }, std::chrono::microseconds(6));
   EXPECT_EQ(count, 0);
-  x.advanceTo(x.now() - microseconds(1));
+  x.advanceTo(x.now() - std::chrono::microseconds(1));
   EXPECT_EQ(count, 0);
 }
 
 TEST(ManualExecutor, advanceNeg) {
   ManualExecutor x;
   size_t count = 0;
-  x.advance(microseconds(5));
-  x.schedule([&]{ count++; }, microseconds(6));
+  x.advance(std::chrono::microseconds(5));
+  x.schedule([&]{ count++; }, std::chrono::microseconds(6));
   EXPECT_EQ(count, 0);
-  x.advance(microseconds(-1));
+  x.advance(std::chrono::microseconds(-1));
   EXPECT_EQ(count, 0);
 }
 
@@ -96,7 +137,7 @@ TEST(ManualExecutor, waitForDoesNotDeadlock) {
   folly::Baton<> baton;
   auto f = makeFuture()
     .via(&east)
-    .then([](Try<void>){ return makeFuture(); })
+    .then([](Try<Unit>){ return makeFuture(); })
     .via(&west);
   std::thread t([&]{
     baton.post();
@@ -105,6 +146,34 @@ TEST(ManualExecutor, waitForDoesNotDeadlock) {
   baton.wait();
   east.run();
   t.join();
+}
+
+TEST(ManualExecutor, getViaDoesNotDeadlock) {
+  ManualExecutor east, west;
+  folly::Baton<> baton;
+  auto f = makeFuture().via(&east).then([](Try<Unit>) {
+    return makeFuture();
+  }).via(&west);
+  std::thread t([&] {
+    baton.post();
+    f.getVia(&west);
+  });
+  baton.wait();
+  east.run();
+  t.join();
+}
+
+TEST(ManualExecutor, clear) {
+  ManualExecutor x;
+  size_t count = 0;
+  x.add([&] { ++count; });
+  x.scheduleAt([&] { ++count; }, x.now() + std::chrono::milliseconds(10));
+  EXPECT_EQ(0, count);
+
+  x.clear();
+  x.advance(std::chrono::milliseconds(10));
+  x.run();
+  EXPECT_EQ(0, count);
 }
 
 TEST(Executor, InlineExecutor) {
@@ -163,7 +232,7 @@ TEST(Executor, RunnablePtr) {
 
 TEST(Executor, ThrowableThen) {
   InlineExecutor x;
-  auto f = Future<void>().via(&x).then([](){
+  auto f = Future<Unit>().via(&x).then([](){
     throw std::runtime_error("Faildog");
   });
   EXPECT_THROW(f.value(), std::exception);
@@ -171,21 +240,42 @@ TEST(Executor, ThrowableThen) {
 
 class CrappyExecutor : public Executor {
  public:
-  void add(Func f) override {
-    throw std::runtime_error("bad");
-  }
+  void add(Func /* f */) override { throw std::runtime_error("bad"); }
 };
 
 TEST(Executor, CrappyExecutor) {
   CrappyExecutor x;
-  try {
-    auto f = Future<void>().via(&x).activate().then([](){
-      return;
-    });
-    f.value();
-    EXPECT_TRUE(false);
-  } catch(...) {
-    // via() should throw
-    return;
+  bool flag = false;
+  auto f = folly::via(&x).onError([&](std::runtime_error& e) {
+    EXPECT_STREQ("bad", e.what());
+    flag = true;
+  });
+  EXPECT_TRUE(flag);
+}
+
+class DoNothingExecutor : public Executor {
+ public:
+  void add(Func f) override {
+    storedFunc_ = std::move(f);
   }
+
+ private:
+  Func storedFunc_;
+};
+
+TEST(Executor, DoNothingExecutor) {
+  DoNothingExecutor x;
+
+  // Submit future callback to DoNothingExecutor
+  auto f = folly::via(&x).then([] { return 42; });
+
+  // Callback function is stored in DoNothingExecutor, but not executed.
+  EXPECT_FALSE(f.isReady());
+
+  // Destroy the function stored in DoNothingExecutor. The future callback
+  // will never get executed.
+  x.add({});
+
+  EXPECT_TRUE(f.isReady());
+  EXPECT_THROW(f.get(), folly::BrokenPromise);
 }

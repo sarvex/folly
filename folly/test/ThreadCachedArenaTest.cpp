@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,21 +15,21 @@
  */
 
 #include <folly/ThreadCachedArena.h>
-#include <folly/Memory.h>
 
+#include <algorithm>
+#include <iterator>
 #include <map>
 #include <mutex>
-#include <thread>
-#include <iterator>
-#include <algorithm>
 #include <random>
+#include <thread>
 #include <unordered_map>
 
 #include <glog/logging.h>
-#include <gtest/gtest.h>
 
-#include <folly/Range.h>
 #include <folly/Benchmark.h>
+#include <folly/Memory.h>
+#include <folly/Range.h>
+#include <folly/portability/GTest.h>
 
 using namespace folly;
 
@@ -58,16 +58,14 @@ void ArenaTester::allocate(size_t count, size_t maxSize) {
   for (size_t i = 0; i < count; i++) {
     size_t size = sizeDist(rnd);
     uint8_t* p = static_cast<uint8_t*>(arena_->allocate(size));
-    areas_.emplace_back(rnd() & 0xff, Range<uint8_t*>(p, size));
+    areas_.emplace_back(uint8_t(rnd() & 0xff), Range<uint8_t*>(p, size));
   }
 
   // Fill each area with a different value, to prove that they don't overlap
   // Fill in random order.
-  std::random_shuffle(
-      areas_.begin(), areas_.end(),
-      [&rnd] (int n) -> int {
-        return std::uniform_int_distribution<uint32_t>(0, n-1)(rnd);
-      });
+  std::random_shuffle(areas_.begin(), areas_.end(), [&rnd](ptrdiff_t n) {
+    return std::uniform_int_distribution<uint32_t>(0, n - 1)(rnd);
+  });
 
   for (auto& p : areas_) {
     std::fill(p.second.begin(), p.second.end(), p.first);
@@ -91,11 +89,10 @@ void ArenaTester::merge(ArenaTester&& other) {
   other.areas_.clear();
 }
 
-}  // namespace
+} // namespace
 
 TEST(ThreadCachedArena, BlockSize) {
-  struct Align { char c; } __attribute__((__aligned__));
-  static const size_t alignment = alignof(Align);
+  static const size_t alignment = folly::max_align_v;
   static const size_t requestedBlockSize = 64;
 
   ThreadCachedArena arena(requestedBlockSize);
@@ -119,9 +116,13 @@ TEST(ThreadCachedArena, BlockSize) {
 TEST(ThreadCachedArena, SingleThreaded) {
   static const size_t requestedBlockSize = 64;
   ThreadCachedArena arena(requestedBlockSize);
+  EXPECT_EQ(arena.totalSize(), sizeof(ThreadCachedArena));
+
   ArenaTester tester(arena);
   tester.allocate(100, 100 << 10);
   tester.verify();
+
+  EXPECT_GT(arena.totalSize(), sizeof(ThreadCachedArena));
 }
 
 TEST(ThreadCachedArena, MultiThreaded) {
@@ -240,8 +241,7 @@ BENCHMARK(bmMArena, iters) {
 
 BENCHMARK_DRAW_LINE()
 
-}  // namespace
-
+} // namespace
 
 // Benchmark                               Iters   Total t    t/iter iter/sec
 // ----------------------------------------------------------------------------

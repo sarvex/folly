@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,10 +21,11 @@
 #include <random>
 #include <thread>
 #include <vector>
+
 #include <glog/logging.h>
-#include <gtest/gtest.h>
 
 #include <folly/Random.h>
+#include <folly/portability/GTest.h>
 
 using namespace folly;
 
@@ -68,12 +69,12 @@ void randomPartition(Random& random, T key, int n,
     int m = std::min(n, 1000);
     std::uniform_int_distribution<uint32_t> u(1, m);
     int cut = u(random);
-    out.push_back(std::make_pair(key, cut));
+    out.emplace_back(key, cut);
     n -= cut;
   }
 }
 
-}  // namespace
+} // namespace
 
 TEST(EventCount, Simple) {
   // We're basically testing for no deadlock.

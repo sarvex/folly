@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,8 +16,8 @@
 
 #pragma once
 
-#include <folly/futures/Deprecated.h>
-#include <folly/futures/Try.h>
+#include <folly/Portability.h>
+#include <folly/Try.h>
 #include <functional>
 
 namespace folly {
@@ -25,9 +25,19 @@ namespace folly {
 // forward declaration
 template <class T> class Future;
 
+namespace futures {
+namespace detail {
+struct EmptyConstruct {};
+template <typename T, typename F>
+class CoreCallbackState;
+} // namespace detail
+} // namespace futures
+
 template <class T>
 class Promise {
-public:
+ public:
+  static Promise<T> makeEmpty() noexcept; // equivalent to moved-from
+
   Promise();
   ~Promise();
 
@@ -36,26 +46,27 @@ public:
   Promise& operator=(Promise const&) = delete;
 
   // movable
-  Promise(Promise<T>&&);
-  Promise& operator=(Promise<T>&&);
+  Promise(Promise<T>&&) noexcept;
+  Promise& operator=(Promise<T>&&) noexcept;
 
   /** Return a Future tied to the shared core state. This can be called only
     once, thereafter Future already retrieved exception will be raised. */
   Future<T> getFuture();
 
-  /** Fulfil the Promise with an exception_wrapper */
+  /** Fulfill the Promise with an exception_wrapper */
   void setException(exception_wrapper ew);
 
-  /** Fulfil the Promise with an exception_ptr, e.g.
+  /** Fulfill the Promise with an exception_ptr, e.g.
     try {
       ...
     } catch (...) {
       p.setException(std::current_exception());
     }
     */
-  void setException(std::exception_ptr const&) DEPRECATED;
+  FOLLY_DEPRECATED("use setException(exception_wrapper)")
+  void setException(std::exception_ptr const&);
 
-  /** Fulfil the Promise with an exception type E, which can be passed to
+  /** Fulfill the Promise with an exception type E, which can be passed to
     std::make_exception_ptr(). Useful for originating exceptions. If you
     caught an exception the exception_wrapper form is more appropriate.
     */
@@ -65,37 +76,48 @@ public:
 
   /// Set an interrupt handler to handle interrupts. See the documentation for
   /// Future::raise(). Your handler can do whatever it wants, but if you
-  /// bother to set one then you probably will want to fulfil the promise with
+  /// bother to set one then you probably will want to fulfill the promise with
   /// an exception (or special value) indicating how the interrupt was
   /// handled.
   void setInterruptHandler(std::function<void(exception_wrapper const&)>);
 
-  /** Fulfil this Promise (only for Promise<void>) */
-  void setValue();
+  /// Sugar to fulfill this Promise<Unit>
+  template <class B = T>
+  typename std::enable_if<std::is_same<Unit, B>::value, void>::type
+  setValue() {
+    setTry(Try<T>(T()));
+  }
 
   /** Set the value (use perfect forwarding for both move and copy) */
   template <class M>
   void setValue(M&& value);
 
-  void fulfilTry(Try<T> t);
+  void setTry(Try<T>&& t);
 
-  /** Fulfil this Promise with the result of a function that takes no
+  /** Fulfill this Promise with the result of a function that takes no
     arguments and returns something implicitly convertible to T.
     Captures exceptions. e.g.
 
-    p.fulfil([] { do something that may throw; return a T; });
+    p.setWith([] { do something that may throw; return a T; });
   */
   template <class F>
-  void fulfil(F&& func);
+  void setWith(F&& func);
 
-private:
+  bool isFulfilled() const noexcept;
+
+ private:
   typedef typename Future<T>::corePtr corePtr;
+  template <class> friend class Future;
+  template <class, class>
+  friend class futures::detail::CoreCallbackState;
 
   // Whether the Future has been retrieved (a one-time operation).
   bool retrieved_;
 
   // shared core state object
   corePtr core_;
+
+  explicit Promise(futures::detail::EmptyConstruct) noexcept;
 
   void throwIfFulfilled();
   void throwIfRetrieved();

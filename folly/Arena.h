@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,13 +14,14 @@
  * limitations under the License.
  */
 
-#ifndef FOLLY_ARENA_H_
+#pragma once
 #define FOLLY_ARENA_H_
 
 #include <cassert>
 #include <limits>
 #include <stdexcept>
 #include <utility>
+
 #include <boost/intrusive/slist.hpp>
 
 #include <folly/Conv.h>
@@ -99,7 +100,7 @@ class Arena {
     return r;
   }
 
-  void deallocate(void* p) {
+  void deallocate(void* /* p */) {
     // Deallocate? Never!
   }
 
@@ -119,7 +120,6 @@ class Arena {
     return bytesUsed_;
   }
 
- private:
   // not copyable
   Arena(const Arena&) = delete;
   Arena& operator=(const Arena&) = delete;
@@ -128,11 +128,12 @@ class Arena {
   Arena(Arena&&) = default;
   Arena& operator=(Arena&&) = default;
 
+ private:
   struct Block;
   typedef boost::intrusive::slist_member_hook<
     boost::intrusive::tag<Arena>> BlockLink;
 
-  struct Block {
+  struct FOLLY_ALIGNED_MAX Block {
     BlockLink link;
 
     // Allocate a block with at least size bytes of storage.
@@ -148,11 +149,9 @@ class Arena {
     }
 
    private:
-    Block() { }
-    ~Block() { }
-  } __attribute__((__aligned__));
-  // This should be alignas(std::max_align_t) but neither alignas nor
-  // max_align_t are supported by gcc 4.6.2.
+    Block() = default;
+    ~Block() = default;
+  };
 
  public:
   static constexpr size_t kDefaultMinBlockSize = 4096 - sizeof(Block);
@@ -217,14 +216,12 @@ struct IsArenaAllocator<Arena<Alloc>> : std::true_type { };
  */
 template <class Alloc>
 struct ArenaAllocatorTraits {
-  static size_t goodSize(const Alloc& alloc, size_t size) {
-    return size;
-  }
+  static size_t goodSize(const Alloc& /* alloc */, size_t size) { return size; }
 };
 
 template <>
 struct ArenaAllocatorTraits<SysAlloc> {
-  static size_t goodSize(const SysAlloc& alloc, size_t size) {
+  static size_t goodSize(const SysAlloc& /* alloc */, size_t size) {
     return goodMallocSize(size);
   }
 };
@@ -244,8 +241,6 @@ class SysArena : public Arena<SysAlloc> {
 template <>
 struct IsArenaAllocator<SysArena> : std::true_type { };
 
-}  // namespace folly
+} // namespace folly
 
 #include <folly/Arena-inl.h>
-
-#endif /* FOLLY_ARENA_H_ */

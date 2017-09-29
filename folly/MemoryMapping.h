@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,14 +14,13 @@
  * limitations under the License.
  */
 
-#ifndef FOLLY_MEMORYMAPPING_H_
-#define FOLLY_MEMORYMAPPING_H_
+#pragma once
 
-#include <folly/FBString.h>
+#include <boost/noncopyable.hpp>
+#include <glog/logging.h>
+
 #include <folly/File.h>
 #include <folly/Range.h>
-#include <glog/logging.h>
-#include <boost/noncopyable.hpp>
 
 namespace folly {
 
@@ -53,7 +52,7 @@ class MemoryMapping : boost::noncopyable {
    * likely become inaccessible) when the MemoryMapping object is destroyed.
    */
   struct Options {
-    Options() { }
+    Options() {}
 
     // Convenience methods; return *this for chaining.
     Options& setPageSize(off_t v) { pageSize = v; return *this; }
@@ -157,12 +156,13 @@ class MemoryMapping : boost::noncopyable {
    * Advise the kernel about memory access.
    */
   void advise(int advice) const;
+  void advise(int advice, size_t offset, size_t length) const;
 
   /**
    * A bitwise cast of the mapped bytes as range of values. Only intended for
    * use with POD or in-place usable types.
    */
-  template<class T>
+  template <class T>
   Range<const T*> asRange() const {
     size_t count = data_.size() / sizeof(T);
     return Range<const T*>(static_cast<const T*>(
@@ -181,7 +181,7 @@ class MemoryMapping : boost::noncopyable {
    * A bitwise cast of the mapped bytes as range of mutable values. Only
    * intended for use with POD or in-place usable types.
    */
-  template<class T>
+  template <class T>
   Range<T*> asWritableRange() const {
     DCHECK(options_.writable);  // you'll segfault anyway...
     size_t count = data_.size() / sizeof(T);
@@ -248,6 +248,4 @@ void alignedForwardMemcpy(void* dest, const void* src, size_t size);
  */
 void mmapFileCopy(const char* src, const char* dest, mode_t mode = 0666);
 
-}  // namespace folly
-
-#endif /* FOLLY_MEMORYMAPPING_H_ */
+} // namespace folly

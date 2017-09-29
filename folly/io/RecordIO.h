@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,7 +22,8 @@
  * or deleted chunks of the file, or modified data.  When reading, you may lose
  * corrupted records, but the stream will resynchronize automatically.
  */
-#ifndef FOLLY_IO_RECORDIO_H_
+
+#pragma once
 #define FOLLY_IO_RECORDIO_H_
 
 #include <atomic>
@@ -30,8 +31,8 @@
 #include <mutex>
 
 #include <folly/File.h>
-#include <folly/Range.h>
 #include <folly/MemoryMapping.h>
+#include <folly/Range.h>
 #include <folly/io/IOBuf.h>
 
 namespace folly {
@@ -171,10 +172,8 @@ RecordInfo findRecord(ByteRange range, uint32_t fileId);
  */
 RecordInfo validateRecord(ByteRange range, uint32_t fileId);
 
-}  // namespace recordio_helpers
+} // namespace recordio_helpers
 
-}  // namespaces
+} // namespace folly
 
 #include <folly/io/RecordIO-inl.h>
-
-#endif /* FOLLY_IO_RECORDIO_H_ */

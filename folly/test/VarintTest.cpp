@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,10 +22,10 @@
 #include <vector>
 
 #include <glog/logging.h>
-#include <gtest/gtest.h>
 
 #include <folly/Benchmark.h>
 #include <folly/Random.h>
+#include <folly/portability/GTest.h>
 
 DEFINE_int32(random_seed, folly::randomNumberSeed(), "random seed");
 
@@ -98,6 +98,17 @@ TEST(Varint, Simple) {
              {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01});
 }
 
+void testVarintFail(std::initializer_list<uint8_t> bytes) {
+  size_t n = bytes.size();
+  ByteRange data(&*bytes.begin(), n);
+  auto ret = tryDecodeVarint(data);
+  EXPECT_FALSE(ret.hasValue());
+}
+
+TEST(Varint, Fail) {
+  testVarintFail({0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff});
+}
+
 TEST(ZigZag, Simple) {
   EXPECT_EQ(0, encodeZigZag(0));
   EXPECT_EQ(1, encodeZigZag(-1));
@@ -163,7 +174,6 @@ void generateRandomValues() {
 BENCHMARK(VarintEncoding, iters) {
   uint8_t* start = &(*gEncoded.begin());
   uint8_t* p = start;
-  bool empty = (iters == 0);
   while (iters--) {
     p = start;
     for (auto& v : gValues) {
@@ -184,8 +194,7 @@ BENCHMARK(VarintDecoding, iters) {
   }
 }
 
-}  // namespace
-
+} // namespace
 }}  // namespaces
 
 int main(int argc, char *argv[]) {

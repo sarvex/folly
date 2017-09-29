@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,14 +16,16 @@
 
 #pragma once
 
+#include <cstring>
+
+#include <array>
 #include <functional>
-#include <iostream>
+#include <iosfwd>
 #include <map>
 #include <stdexcept>
 
-#include <boost/operators.hpp>
-
 #include <folly/Hash.h>
+#include <folly/Optional.h>
 #include <folly/Range.h>
 #include <folly/detail/IPAddress.h>
 
@@ -63,11 +65,13 @@ typedef std::array<uint8_t, 16> ByteArray16;
  * Serializing / Deserializing IPAddressB6's on different hosts
  * that use link-local scoping probably won't work.
  */
-class IPAddressV6 : boost::totally_ordered<IPAddressV6> {
+class IPAddressV6 {
  public:
   // V6 Address Type
   enum Type {
-    TEREDO, T6TO4, NORMAL,
+    TEREDO,
+    T6TO4,
+    NORMAL,
   };
   // A constructor parameter to indicate that we should create a link-local
   // IPAddressV6.
@@ -82,6 +86,13 @@ class IPAddressV6 : boost::totally_ordered<IPAddressV6> {
   // Binary prefix for 6to4 networks
   static const uint32_t PREFIX_6TO4;
 
+  // Size of std::string returned by toFullyQualified.
+  static constexpr size_t kToFullyQualifiedSize =
+      8 /*words*/ * 4 /*hex chars per word*/ + 7 /*separators*/;
+
+  // returns true iff the input string can be parsed as an ipv6-address
+  static bool validate(StringPiece ip);
+
   /**
    * Create a new IPAddress instance from the provided binary data.
    * @throws IPAddressFormatException if the input length is not 16 bytes.
@@ -90,6 +101,20 @@ class IPAddressV6 : boost::totally_ordered<IPAddressV6> {
     IPAddressV6 addr;
     addr.setFromBinary(bytes);
     return addr;
+  }
+
+  /**
+   * Create a new IPAddress instance from the ip6.arpa representation.
+   * @throws IPAddressFormatException if the input is not a valid ip6.arpa
+   * representation
+   */
+  static IPAddressV6 fromInverseArpaName(const std::string& arpaname);
+
+  /**
+   * Returns the address as a Range.
+   */
+  ByteRange toBinary() const {
+    return ByteRange((const unsigned char*)&addr_.in6Addr_.s6_addr, 16);
   }
 
   /**
@@ -148,7 +173,9 @@ class IPAddressV6 : boost::totally_ordered<IPAddressV6> {
    * @see IPAddress#bitCount
    * @returns 128
    */
-  static size_t bitCount() { return 128; }
+  static constexpr size_t bitCount() {
+    return 128;
+  }
 
   /**
    * @see IPAddress#toJson
@@ -165,8 +192,8 @@ class IPAddressV6 : boost::totally_ordered<IPAddressV6> {
   bool inSubnet(const IPAddressV6& subnet, uint8_t cidr) const {
     return inSubnetWithMask(subnet, fetchMask(cidr));
   }
-  bool inSubnetWithMask(const IPAddressV6& subnet,
-                        const ByteArray16& mask) const;
+  bool inSubnetWithMask(const IPAddressV6& subnet, const ByteArray16& mask)
+      const;
 
   // @see IPAddress#isLoopback
   bool isLoopback() const;
@@ -195,6 +222,26 @@ class IPAddressV6 : boost::totally_ordered<IPAddressV6> {
   bool isLinkLocal() const;
 
   /**
+   * Return the mac address if this is a link-local IPv6 address.
+   *
+   * @return an Optional<MacAddress> union representing the mac address.
+   *
+   * If the address is not a link-local one it will return an empty Optional.
+   * You can use Optional::value() to check whether the mac address is not null.
+   */
+  Optional<MacAddress> getMacAddressFromLinkLocal() const;
+
+  /**
+   * Return the mac address if this is an auto-configured IPv6 address based on
+   * EUI-64
+   *
+   * @return an Optional<MacAddress> union representing the mac address.
+   * If the address is not based on EUI-64 it will return an empty Optional.
+   * You can use Optional::value() to check whether the mac address is not null.
+   */
+  Optional<MacAddress> getMacAddressFromEUI64() const;
+
+  /**
    * Return true if this is a multicast address.
    */
   bool isMulticast() const;
@@ -213,7 +260,8 @@ class IPAddressV6 : boost::totally_ordered<IPAddressV6> {
 
   // @see IPAddress#isZero
   bool isZero() const {
-    return detail::Bytes::isZero(bytes(), 16);
+    constexpr auto zero = ByteArray16{{}};
+    return 0 == std::memcmp(bytes(), zero.data(), zero.size());
   }
 
   bool isLinkLocalBroadcast() const;
@@ -222,9 +270,13 @@ class IPAddressV6 : boost::totally_ordered<IPAddressV6> {
   IPAddressV6 mask(size_t numBits) const;
 
   // return underlying in6_addr structure
-  in6_addr toAddr() const { return addr_.in6Addr_; }
+  in6_addr toAddr() const {
+    return addr_.in6Addr_;
+  }
 
-  uint16_t getScopeId() const { return scope_; }
+  uint16_t getScopeId() const {
+    return scope_;
+  }
   void setScopeId(uint16_t scope) {
     scope_ = scope;
   }
@@ -247,11 +299,18 @@ class IPAddressV6 : boost::totally_ordered<IPAddressV6> {
   // @see IPAddress#toFullyQualified
   std::string toFullyQualified() const;
 
+  // @see IPAddress#toFullyQualifiedAppend
+  void toFullyQualifiedAppend(std::string& out) const;
+
+  std::string toInverseArpaName() const;
+
   // @see IPAddress#str
   std::string str() const;
 
   // @see IPAddress#version
-  size_t version() const { return 6; }
+  uint8_t version() const {
+    return 6;
+  }
 
   /**
    * Return the solicited-node multicast address for this address.
@@ -269,39 +328,64 @@ class IPAddressV6 : boost::totally_ordered<IPAddressV6> {
   static const ByteArray16 fetchMask(size_t numBits);
   // Given 2 IPAddressV6,mask pairs extract the longest common IPAddress,
   // mask pair
-  static CIDRNetworkV6 longestCommonPrefix(const CIDRNetworkV6& one,
-                                           const CIDRNetworkV6& two) {
-    auto prefix = detail::Bytes::longestCommonPrefix(
-      one.first.addr_.bytes_, one.second,
-      two.first.addr_.bytes_, two.second);
-    return {IPAddressV6(prefix.first), prefix.second};
-  }
+  static CIDRNetworkV6 longestCommonPrefix(
+      const CIDRNetworkV6& one,
+      const CIDRNetworkV6& two);
   // Number of bytes in the address representation.
-  static constexpr size_t byteCount() { return 16; }
+  static constexpr size_t byteCount() {
+    return 16;
+  }
 
-  //get nth most significant bit - 0 indexed
+  // get nth most significant bit - 0 indexed
   bool getNthMSBit(size_t bitIndex) const {
     return detail::getNthMSBitImpl(*this, bitIndex, AF_INET6);
   }
-  //get nth most significant byte - 0 indexed
+  // get nth most significant byte - 0 indexed
   uint8_t getNthMSByte(size_t byteIndex) const;
-  //get nth bit - 0 indexed
+  // get nth bit - 0 indexed
   bool getNthLSBit(size_t bitIndex) const {
     return getNthMSBit(bitCount() - bitIndex - 1);
   }
-  //get nth byte - 0 indexed
+  // get nth byte - 0 indexed
   uint8_t getNthLSByte(size_t byteIndex) const {
     return getNthMSByte(byteCount() - byteIndex - 1);
   }
 
-  const unsigned char* bytes() const { return addr_.in6Addr_.s6_addr; }
-  protected:
+  const unsigned char* bytes() const {
+    return addr_.in6Addr_.s6_addr;
+  }
+
+ protected:
   /**
    * Helper that returns true if the address is in the binary subnet specified
    * by addr.
    */
-  bool inBinarySubnet(const std::array<uint8_t, 2> addr,
-                      size_t numBits) const;
+  bool inBinarySubnet(const std::array<uint8_t, 2> addr, size_t numBits) const;
+
+ private:
+  auto tie() const {
+    return std::tie(addr_.bytes_, scope_);
+  }
+
+ public:
+  friend inline bool operator==(const IPAddressV6& a, const IPAddressV6& b) {
+    return a.tie() == b.tie();
+  }
+  friend inline bool operator!=(const IPAddressV6& a, const IPAddressV6& b) {
+    return a.tie() != b.tie();
+  }
+  friend inline bool operator<(const IPAddressV6& a, const IPAddressV6& b) {
+    return a.tie() < b.tie();
+  }
+  friend inline bool operator>(const IPAddressV6& a, const IPAddressV6& b) {
+    return a.tie() > b.tie();
+  }
+  friend inline bool operator<=(const IPAddressV6& a, const IPAddressV6& b) {
+    return a.tie() <= b.tie();
+  }
+  friend inline bool operator>=(const IPAddressV6& a, const IPAddressV6& b) {
+    return a.tie() >= b.tie();
+  }
 
  private:
   union AddressStorage {
@@ -310,16 +394,14 @@ class IPAddressV6 : boost::totally_ordered<IPAddressV6> {
     AddressStorage() {
       std::memset(this, 0, sizeof(AddressStorage));
     }
-    explicit AddressStorage(const ByteArray16& bytes): bytes_(bytes) {}
-    explicit AddressStorage(const in6_addr& addr): in6Addr_(addr) {}
+    explicit AddressStorage(const ByteArray16& bytes) : bytes_(bytes) {}
+    explicit AddressStorage(const in6_addr& addr) : in6Addr_(addr) {}
     explicit AddressStorage(MacAddress mac);
   } addr_;
 
   // Link-local scope id.  This should always be 0 for IPAddresses that
   // are *not* link-local.
   uint16_t scope_{0};
-
-  static const std::array<ByteArray16, 129> masks_;
 
   /**
    * Set the current IPAddressV6 object to have the address specified by bytes.
@@ -336,31 +418,13 @@ std::ostream& operator<<(std::ostream& os, const IPAddressV6& addr);
 void toAppend(IPAddressV6 addr, std::string* result);
 void toAppend(IPAddressV6 addr, fbstring* result);
 
-/**
- * Return true if two addresses are equal.
- */
-inline bool operator==(const IPAddressV6& addr1, const IPAddressV6& addr2) {
-  return (std::memcmp(addr1.toAddr().s6_addr, addr2.toAddr().s6_addr, 16) == 0)
-    && addr1.getScopeId() == addr2.getScopeId();
-}
-// Return true if addr1 < addr2
-inline bool operator<(const IPAddressV6& addr1, const IPAddressV6& addr2) {
-  auto cmp = std::memcmp(addr1.toAddr().s6_addr,
-                         addr2.toAddr().s6_addr, 16) < 0;
-  if (!cmp) {
-    return addr1.getScopeId() < addr2.getScopeId();
-  } else {
-    return cmp;
-  }
-}
-
-}  // folly
+} // namespace folly
 
 namespace std {
-template<>
+template <>
 struct hash<folly::IPAddressV6> {
   size_t operator()(const folly::IPAddressV6& addr) const {
     return addr.hash();
   }
 };
-}  // std
+} // namespace std

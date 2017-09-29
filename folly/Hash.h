@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,17 +14,20 @@
  * limitations under the License.
  */
 
-#ifndef FOLLY_BASE_HASH_H_
-#define FOLLY_BASE_HASH_H_
+#pragma once
 
+#include <cstdint>
 #include <cstring>
-#include <stdint.h>
+#include <limits>
 #include <string>
-#include <utility>
 #include <tuple>
+#include <type_traits>
+#include <utility>
 
-#include <folly/SpookyHashV1.h>
-#include <folly/SpookyHashV2.h>
+#include <folly/ApplyTuple.h>
+#include <folly/Bits.h>
+#include <folly/hash/SpookyHashV1.h>
+#include <folly/hash/SpookyHashV2.h>
 
 /*
  * Various hashing functions.
@@ -72,6 +75,8 @@ uint64_t hash_range(Iter begin,
   return hash;
 }
 
+inline uint32_t twang_32from64(uint64_t key);
+
 template <class Hasher, typename T, typename... Ts>
 size_t hash_combine_generic(const T& t, const Ts&... ts) {
   size_t seed = Hasher::hash(t);
@@ -79,7 +84,11 @@ size_t hash_combine_generic(const T& t, const Ts&... ts) {
     return seed;
   }
   size_t remainder = hash_combine_generic<Hasher>(ts...);
-  return hash_128_to_64(seed, remainder);
+  /* static */ if (sizeof(size_t) == sizeof(uint32_t)) {
+    return twang_32from64((uint64_t(seed) << 32) | remainder);
+  } else {
+    return static_cast<size_t>(hash_128_to_64(seed, remainder));
+  }
 }
 
 // Simply uses std::hash to hash.  Note that std::hash is not guaranteed
@@ -205,9 +214,12 @@ inline uint32_t jenkins_rev_unmix32(uint32_t key) {
 
 const uint32_t FNV_32_HASH_START = 2166136261UL;
 const uint64_t FNV_64_HASH_START = 14695981039346656037ULL;
+const uint64_t FNVA_64_HASH_START = 14695981039346656037ULL;
 
-inline uint32_t fnv32(const char* s,
-                      uint32_t hash = FNV_32_HASH_START) {
+inline uint32_t fnv32(const char* buf, uint32_t hash = FNV_32_HASH_START) {
+  // forcing signed char, since other platforms can use unsigned
+  const signed char* s = reinterpret_cast<const signed char*>(buf);
+
   for (; *s; ++s) {
     hash += (hash << 1) + (hash << 4) + (hash << 7) +
             (hash << 8) + (hash << 24);
@@ -219,7 +231,8 @@ inline uint32_t fnv32(const char* s,
 inline uint32_t fnv32_buf(const void* buf,
                           size_t n,
                           uint32_t hash = FNV_32_HASH_START) {
-  const char* char_buf = reinterpret_cast<const char*>(buf);
+  // forcing signed char, since other platforms can use unsigned
+  const signed char* char_buf = reinterpret_cast<const signed char*>(buf);
 
   for (size_t i = 0; i < n; ++i) {
     hash += (hash << 1) + (hash << 4) + (hash << 7) +
@@ -235,8 +248,10 @@ inline uint32_t fnv32(const std::string& str,
   return fnv32_buf(str.data(), str.size(), hash);
 }
 
-inline uint64_t fnv64(const char* s,
-                      uint64_t hash = FNV_64_HASH_START) {
+inline uint64_t fnv64(const char* buf, uint64_t hash = FNV_64_HASH_START) {
+  // forcing signed char, since other platforms can use unsigned
+  const signed char* s = reinterpret_cast<const signed char*>(buf);
+
   for (; *s; ++s) {
     hash += (hash << 1) + (hash << 4) + (hash << 5) + (hash << 7) +
       (hash << 8) + (hash << 40);
@@ -248,7 +263,8 @@ inline uint64_t fnv64(const char* s,
 inline uint64_t fnv64_buf(const void* buf,
                           size_t n,
                           uint64_t hash = FNV_64_HASH_START) {
-  const char* char_buf = reinterpret_cast<const char*>(buf);
+  // forcing signed char, since other platforms can use unsigned
+  const signed char* char_buf = reinterpret_cast<const signed char*>(buf);
 
   for (size_t i = 0; i < n; ++i) {
     hash += (hash << 1) + (hash << 4) + (hash << 5) + (hash << 7) +
@@ -263,14 +279,33 @@ inline uint64_t fnv64(const std::string& str,
   return fnv64_buf(str.data(), str.size(), hash);
 }
 
+inline uint64_t fnva64_buf(const void* buf,
+                           size_t n,
+                           uint64_t hash = FNVA_64_HASH_START) {
+  const uint8_t* char_buf = reinterpret_cast<const uint8_t*>(buf);
+
+  for (size_t i = 0; i < n; ++i) {
+    hash ^= char_buf[i];
+    hash += (hash << 1) + (hash << 4) + (hash << 5) + (hash << 7) +
+            (hash << 8) + (hash << 40);
+  }
+  return hash;
+}
+
+inline uint64_t fnva64(const std::string& str,
+                       uint64_t hash = FNVA_64_HASH_START) {
+  return fnva64_buf(str.data(), str.size(), hash);
+}
+
 /*
  * Paul Hsieh: http://www.azillionmonkeys.com/qed/hash.html
  */
 
-#define get16bits(d) (*((const uint16_t*) (d)))
+#define get16bits(d) folly::loadUnaligned<uint16_t>(d)
 
 inline uint32_t hsieh_hash32_buf(const void* buf, size_t len) {
-  const char* s = reinterpret_cast<const char*>(buf);
+  // forcing signed char, since other platforms can use unsigned
+  const unsigned char* s = reinterpret_cast<const unsigned char*>(buf);
   uint32_t hash = static_cast<uint32_t>(len);
   uint32_t tmp;
   size_t rem;
@@ -335,30 +370,110 @@ inline uint32_t hsieh_hash32_str(const std::string& str) {
 
 } // namespace hash
 
-template<class Key>
+template <class Key, class Enable = void>
 struct hasher;
 
-template<> struct hasher<int32_t> {
+struct Hash {
+  template <class T>
+  size_t operator()(const T& v) const {
+    return hasher<T>()(v);
+  }
+
+  template <class T, class... Ts>
+  size_t operator()(const T& t, const Ts&... ts) const {
+    return hash::hash_128_to_64((*this)(t), (*this)(ts...));
+  }
+};
+
+template <>
+struct hasher<bool> {
+  size_t operator()(bool key) const {
+    // Make sure that all the output bits depend on the input.
+    return key ? std::numeric_limits<size_t>::max() : 0;
+  }
+};
+
+template <> struct hasher<int32_t> {
   size_t operator()(int32_t key) const {
     return hash::jenkins_rev_mix32(uint32_t(key));
   }
 };
 
-template<> struct hasher<uint32_t> {
+template <> struct hasher<uint32_t> {
   size_t operator()(uint32_t key) const {
     return hash::jenkins_rev_mix32(key);
   }
 };
 
-template<> struct hasher<int64_t> {
-  size_t operator()(int64_t key) const {
-    return hash::twang_mix64(uint64_t(key));
+template <> struct hasher<int16_t> {
+  size_t operator()(int16_t key) const {
+    return hasher<int32_t>()(key); // as impl accident, sign-extends
   }
 };
 
-template<> struct hasher<uint64_t> {
+template <> struct hasher<uint16_t> {
+  size_t operator()(uint16_t key) const {
+    return hasher<uint32_t>()(key);
+  }
+};
+
+template <> struct hasher<int8_t> {
+  size_t operator()(int8_t key) const {
+    return hasher<int32_t>()(key); // as impl accident, sign-extends
+  }
+};
+
+template <> struct hasher<uint8_t> {
+  size_t operator()(uint8_t key) const {
+    return hasher<uint32_t>()(key);
+  }
+};
+
+template <> struct hasher<char> {
+  using explicit_type =
+      std::conditional<std::is_signed<char>::value, int8_t, uint8_t>::type;
+  size_t operator()(char key) const {
+    return hasher<explicit_type>()(key); // as impl accident, sign-extends
+  }
+};
+
+template <> struct hasher<int64_t> {
+  size_t operator()(int64_t key) const {
+    return static_cast<size_t>(hash::twang_mix64(uint64_t(key)));
+  }
+};
+
+template <> struct hasher<uint64_t> {
   size_t operator()(uint64_t key) const {
-    return hash::twang_mix64(key);
+    return static_cast<size_t>(hash::twang_mix64(key));
+  }
+};
+
+template <> struct hasher<std::string> {
+  size_t operator()(const std::string& key) const {
+    return static_cast<size_t>(
+        hash::SpookyHashV2::Hash64(key.data(), key.size(), 0));
+  }
+};
+
+template <class T>
+struct hasher<T, typename std::enable_if<std::is_enum<T>::value, void>::type> {
+  size_t operator()(T key) const {
+    return Hash()(static_cast<typename std::underlying_type<T>::type>(key));
+  }
+};
+
+template <class T1, class T2>
+struct hasher<std::pair<T1, T2>> {
+  size_t operator()(const std::pair<T1, T2>& key) const {
+    return Hash()(key.first, key.second);
+  }
+};
+
+template <typename... Ts>
+struct hasher<std::tuple<Ts...>> {
+  size_t operator() (const std::tuple<Ts...>& key) const {
+    return applyTuple(Hash(), key);
   }
 };
 
@@ -390,7 +505,7 @@ namespace std {
   // items in the pair.
   template <typename T1, typename T2>
   struct hash<std::pair<T1, T2> > {
-  public:
+   public:
     size_t operator()(const std::pair<T1, T2>& x) const {
       return folly::hash::hash_combine(x.first, x.second);
     }
@@ -408,5 +523,3 @@ namespace std {
     }
   };
 } // namespace std
-
-#endif

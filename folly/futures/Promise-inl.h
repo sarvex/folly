@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,16 +25,23 @@
 namespace folly {
 
 template <class T>
-Promise<T>::Promise() : retrieved_(false), core_(new detail::Core<T>())
-{}
-
-template <class T>
-Promise<T>::Promise(Promise<T>&& other) : core_(nullptr) {
-  *this = std::move(other);
+Promise<T> Promise<T>::makeEmpty() noexcept {
+  return Promise<T>(futures::detail::EmptyConstruct{});
 }
 
 template <class T>
-Promise<T>& Promise<T>::operator=(Promise<T>&& other) {
+Promise<T>::Promise()
+    : retrieved_(false), core_(new futures::detail::Core<T>()) {}
+
+template <class T>
+Promise<T>::Promise(Promise<T>&& other) noexcept
+    : retrieved_(other.retrieved_), core_(other.core_) {
+  other.core_ = nullptr;
+  other.retrieved_ = false;
+}
+
+template <class T>
+Promise<T>& Promise<T>::operator=(Promise<T>&& other) noexcept {
   std::swap(core_, other.core_);
   std::swap(retrieved_, other.retrieved_);
   return *this;
@@ -42,17 +49,24 @@ Promise<T>& Promise<T>::operator=(Promise<T>&& other) {
 
 template <class T>
 void Promise<T>::throwIfFulfilled() {
-  if (!core_)
-    throw NoState();
-  if (core_->ready())
-    throw PromiseAlreadySatisfied();
+  if (!core_) {
+    throwNoState();
+  }
+  if (core_->ready()) {
+    throwPromiseAlreadySatisfied();
+  }
 }
 
 template <class T>
 void Promise<T>::throwIfRetrieved() {
-  if (retrieved_)
-    throw FutureAlreadyRetrieved();
+  if (retrieved_) {
+    throwFutureAlreadyRetrieved();
+  }
 }
+
+template <class T>
+Promise<T>::Promise(futures::detail::EmptyConstruct) noexcept
+    : retrieved_(false), core_(nullptr) {}
 
 template <class T>
 Promise<T>::~Promise() {
@@ -85,13 +99,7 @@ Promise<T>::setException(E const& e) {
 
 template <class T>
 void Promise<T>::setException(std::exception_ptr const& ep) {
-  try {
-    std::rethrow_exception(ep);
-  } catch (const std::exception& e) {
-    setException(exception_wrapper(std::current_exception(), e));
-  } catch (...) {
-    setException(exception_wrapper(std::current_exception()));
-  }
+  setException(exception_wrapper::from_exception_ptr(ep));
 }
 
 template <class T>
@@ -107,7 +115,7 @@ void Promise<T>::setInterruptHandler(
 }
 
 template <class T>
-void Promise<T>::fulfilTry(Try<T> t) {
+void Promise<T>::setTry(Try<T>&& t) {
   throwIfFulfilled();
   core_->setResult(std::move(t));
 }
@@ -118,22 +126,22 @@ void Promise<T>::setValue(M&& v) {
   static_assert(!std::is_same<T, void>::value,
                 "Use setValue() instead");
 
-  fulfilTry(Try<T>(std::forward<M>(v)));
-}
-
-template <class T>
-void Promise<T>::setValue() {
-  static_assert(std::is_same<T, void>::value,
-                "Use setValue(value) instead");
-
-  fulfilTry(Try<void>());
+  setTry(Try<T>(std::forward<M>(v)));
 }
 
 template <class T>
 template <class F>
-void Promise<T>::fulfil(F&& func) {
+void Promise<T>::setWith(F&& func) {
   throwIfFulfilled();
-  fulfilTry(makeTryFunction(std::forward<F>(func)));
+  setTry(makeTryWith(std::forward<F>(func)));
+}
+
+template <class T>
+bool Promise<T>::isFulfilled() const noexcept {
+  if (core_) {
+    return core_->hasResult();
+  }
+  return true;
 }
 
 }

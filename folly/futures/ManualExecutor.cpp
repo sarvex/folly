@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,20 +20,12 @@
 #include <string>
 #include <tuple>
 
-#include <stdexcept>
-
 namespace folly {
-
-ManualExecutor::ManualExecutor() {
-  if (sem_init(&sem_, 0, 0) == -1) {
-    throw std::runtime_error(std::string("sem_init: ") + strerror(errno));
-  }
-}
 
 void ManualExecutor::add(Func callback) {
   std::lock_guard<std::mutex> lock(lock_);
-  funcs_.push(std::move(callback));
-  sem_post(&sem_);
+  funcs_.emplace(std::move(callback));
+  sem_.post();
 }
 
 size_t ManualExecutor::run() {
@@ -48,7 +40,7 @@ size_t ManualExecutor::run() {
       auto& sf = scheduledFuncs_.top();
       if (sf.time > now_)
         break;
-      funcs_.push(sf.func);
+      funcs_.emplace(sf.moveOutFunc());
       scheduledFuncs_.pop();
     }
 
@@ -65,7 +57,7 @@ size_t ManualExecutor::run() {
       // Balance the semaphore so it doesn't grow without bound
       // if nobody is calling wait().
       // This may fail (with EAGAIN), that's fine.
-      sem_trywait(&sem_);
+      sem_.tryWait();
 
       func = std::move(funcs_.front());
       funcs_.pop();
@@ -84,13 +76,7 @@ void ManualExecutor::wait() {
         break;
     }
 
-    auto ret = sem_wait(&sem_);
-    if (ret == 0) {
-      break;
-    }
-    if (errno != EINVAL) {
-      throw std::runtime_error(std::string("sem_wait: ") + strerror(errno));
-    }
+    sem_.wait();
   }
 }
 
@@ -101,4 +87,4 @@ void ManualExecutor::advanceTo(TimePoint const& t) {
   run();
 }
 
-} // folly
+} // namespace folly

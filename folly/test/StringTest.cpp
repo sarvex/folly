@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,14 +14,18 @@
  * limitations under the License.
  */
 
+#ifndef __STDC_FORMAT_MACROS
+#define __STDC_FORMAT_MACROS 1
+#endif
+
 #include <folly/String.h>
 
-#include <cstdarg>
-#include <random>
-#include <boost/algorithm/string.hpp>
-#include <gtest/gtest.h>
+#include <cinttypes>
 
-#include <folly/Benchmark.h>
+#include <boost/regex.hpp>
+
+#include <folly/Array.h>
+#include <folly/portability/GTest.h>
 
 using namespace folly;
 using namespace std;
@@ -37,12 +41,15 @@ TEST(StringPrintf, BasicTest) {
 
 TEST(StringPrintf, NumericFormats) {
   EXPECT_EQ("12", stringPrintf("%d", 12));
-  EXPECT_EQ("5000000000", stringPrintf("%ld", 5000000000UL));
-  EXPECT_EQ("5000000000", stringPrintf("%ld", 5000000000L));
-  EXPECT_EQ("-5000000000", stringPrintf("%ld", -5000000000L));
+  EXPECT_EQ("2000000000", stringPrintf("%ld", 2000000000UL));
+  EXPECT_EQ("2000000000", stringPrintf("%ld", 2000000000L));
+  EXPECT_EQ("-2000000000", stringPrintf("%ld", -2000000000L));
+  EXPECT_EQ("5000000000", stringPrintf("%lld", 5000000000ULL));
+  EXPECT_EQ("5000000000", stringPrintf("%lld", 5000000000LL));
+  EXPECT_EQ("-5000000000", stringPrintf("%lld", -5000000000LL));
   EXPECT_EQ("-1", stringPrintf("%d", 0xffffffff));
-  EXPECT_EQ("-1", stringPrintf("%ld", 0xffffffffffffffff));
-  EXPECT_EQ("-1", stringPrintf("%ld", 0xffffffffffffffffUL));
+  EXPECT_EQ("-1", stringPrintf("%" PRId64, 0xffffffffffffffff));
+  EXPECT_EQ("-1", stringPrintf("%" PRId64, 0xffffffffffffffffUL));
 
   EXPECT_EQ("7.7", stringPrintf("%1.1f", 7.7));
   EXPECT_EQ("7.7", stringPrintf("%1.1lf", 7.7));
@@ -102,7 +109,7 @@ void vprintfError(const char* fmt, ...) {
   // OSX's sprintf family does not return a negative number on a bad format
   // string, but Linux does. It's unclear to me which behavior is more
   // correct.
-#if !__APPLE__
+#ifdef HAVE_VSNPRINTF_ERRORS
   EXPECT_THROW({stringVPrintf(fmt, ap);},
                std::runtime_error);
 #endif
@@ -153,39 +160,6 @@ TEST(StringPrintf, oldStringAppendf) {
   string s = "hello";
   stringAppendf(&s, "%s/%s/%s/%s", "a", "b", "c", "d");
   EXPECT_EQ(string("helloa/b/c/d"), s);
-}
-
-// A simple benchmark that tests various output sizes for a simple
-// input; the goal is to measure the output buffer resize code cost.
-void stringPrintfOutputSize(int iters, int param) {
-  string buffer;
-  BENCHMARK_SUSPEND { buffer.resize(param, 'x'); }
-
-  for (int64_t i = 0; i < iters; ++i) {
-    string s = stringPrintf("msg: %d, %d, %s", 10, 20, buffer.c_str());
-  }
-}
-
-// The first few of these tend to fit in the inline buffer, while the
-// subsequent ones cross that limit, trigger a second vsnprintf, and
-// exercise a different codepath.
-BENCHMARK_PARAM(stringPrintfOutputSize, 1)
-BENCHMARK_PARAM(stringPrintfOutputSize, 4)
-BENCHMARK_PARAM(stringPrintfOutputSize, 16)
-BENCHMARK_PARAM(stringPrintfOutputSize, 64)
-BENCHMARK_PARAM(stringPrintfOutputSize, 256)
-BENCHMARK_PARAM(stringPrintfOutputSize, 1024)
-
-// Benchmark simple stringAppendf behavior to show a pathology Lovro
-// reported (t5735468).
-BENCHMARK(stringPrintfAppendfBenchmark, iters) {
-  for (unsigned int i = 0; i < iters; ++i) {
-    string s;
-    BENCHMARK_SUSPEND { s.reserve(300000); }
-    for (int j = 0; j < 300000; ++j) {
-      stringAppendf(&s, "%d", 1);
-    }
-  }
 }
 
 TEST(Escape, cEscape) {
@@ -250,7 +224,7 @@ void expectPrintable(StringPiece s) {
     EXPECT_GE(127, c);
   }
 }
-}  // namespace
+} // namespace
 
 TEST(Escape, uriEscapeAllCombinations) {
   char c[3];
@@ -278,7 +252,7 @@ bool isHex(int v) {
           (v >= 'A' && v <= 'F') ||
           (v >= 'a' && v <= 'f'));
 }
-}  // namespace
+} // namespace
 
 TEST(Escape, uriUnescapePercentDecoding) {
   char c[4] = {'%', '\0', '\0', '\0'};
@@ -304,102 +278,12 @@ TEST(Escape, uriUnescapePercentDecoding) {
 }
 
 namespace {
-fbstring cbmString;
-fbstring cbmEscapedString;
-fbstring cEscapedString;
-fbstring cUnescapedString;
-const size_t kCBmStringLength = 64 << 10;
-const uint32_t kCPrintablePercentage = 90;
-
-fbstring uribmString;
-fbstring uribmEscapedString;
-fbstring uriEscapedString;
-fbstring uriUnescapedString;
-const size_t kURIBmStringLength = 256;
-const uint32_t kURIPassThroughPercentage = 50;
-
-void initBenchmark() {
-  std::mt19937 rnd;
-
-  // C escape
-  std::uniform_int_distribution<uint32_t> printable(32, 126);
-  std::uniform_int_distribution<uint32_t> nonPrintable(0, 160);
-  std::uniform_int_distribution<uint32_t> percentage(0, 99);
-
-  cbmString.reserve(kCBmStringLength);
-  for (size_t i = 0; i < kCBmStringLength; ++i) {
-    unsigned char c;
-    if (percentage(rnd) < kCPrintablePercentage) {
-      c = printable(rnd);
-    } else {
-      c = nonPrintable(rnd);
-      // Generate characters in both non-printable ranges:
-      // 0..31 and 127..255
-      if (c >= 32) {
-        c += (126 - 32) + 1;
-      }
-    }
-    cbmString.push_back(c);
-  }
-
-  cbmEscapedString = cEscape<fbstring>(cbmString);
-
-  // URI escape
-  std::uniform_int_distribution<uint32_t> passthrough('a', 'z');
-  std::string encodeChars = " ?!\"',+[]";
-  std::uniform_int_distribution<uint32_t> encode(0, encodeChars.size() - 1);
-
-  uribmString.reserve(kURIBmStringLength);
-  for (size_t i = 0; i < kURIBmStringLength; ++i) {
-    unsigned char c;
-    if (percentage(rnd) < kURIPassThroughPercentage) {
-      c = passthrough(rnd);
-    } else {
-      c = encodeChars[encode(rnd)];
-    }
-    uribmString.push_back(c);
-  }
-
-  uribmEscapedString = uriEscape<fbstring>(uribmString);
-}
-
-BENCHMARK(BM_cEscape, iters) {
-  while (iters--) {
-    cEscapedString = cEscape<fbstring>(cbmString);
-    doNotOptimizeAway(cEscapedString.size());
-  }
-}
-
-BENCHMARK(BM_cUnescape, iters) {
-  while (iters--) {
-    cUnescapedString = cUnescape<fbstring>(cbmEscapedString);
-    doNotOptimizeAway(cUnescapedString.size());
-  }
-}
-
-BENCHMARK(BM_uriEscape, iters) {
-  while (iters--) {
-    uriEscapedString = uriEscape<fbstring>(uribmString);
-    doNotOptimizeAway(uriEscapedString.size());
-  }
-}
-
-BENCHMARK(BM_uriUnescape, iters) {
-  while (iters--) {
-    uriUnescapedString = uriUnescape<fbstring>(uribmEscapedString);
-    doNotOptimizeAway(uriUnescapedString.size());
-  }
-}
-
-}  // namespace
-
-namespace {
 
 double pow2(int exponent) {
   return double(int64_t(1) << exponent);
 }
 
-}  // namespace
+} // namespace
 struct PrettyTestCase{
   std::string prettyString;
   double realValue;
@@ -532,11 +416,11 @@ TEST(PrettyToDouble, Basic) {
     PrettyType formatType = testCase.prettyType;
     double x = testCase.realValue;
     std::string testString = testCase.prettyString;
-    double recoveredX;
+    double recoveredX = 0;
     try{
       recoveredX = prettyToDouble(testString, formatType);
-    } catch (std::range_error &ex){
-      EXPECT_TRUE(false);
+    } catch (const std::range_error& ex) {
+      ADD_FAILURE() << testCase.prettyString << " -> " << ex.what();
     }
     double relativeError = fabs(x) < 1e-5 ? (x-recoveredX) :
                                             (x - recoveredX) / x;
@@ -549,12 +433,12 @@ TEST(PrettyToDouble, Basic) {
     for (double x = 1e-18; x < 1e40; x *= 1.9){
       bool addSpace = static_cast<PrettyType> (i) == PRETTY_SI;
       for (int it = 0; it < 2; ++it, addSpace = true){
-        double recoveredX;
+        double recoveredX = 0;
         try{
           recoveredX = prettyToDouble(prettyPrint(x, formatType, addSpace),
                                              formatType);
-        } catch (std::range_error &ex){
-          EXPECT_TRUE(false);
+        } catch (std::range_error&) {
+          ADD_FAILURE();
         }
         double relativeError = (x - recoveredX) / x;
         EXPECT_NEAR(0, relativeError, 1e-3);
@@ -607,36 +491,9 @@ TEST(System, errnoStr) {
   EXPECT_EQ(EACCES, errno);
 }
 
-namespace folly_test {
-struct ThisIsAVeryLongStructureName {
-};
-}  // namespace folly_test
-
-#if FOLLY_HAVE_CPLUS_DEMANGLE_V3_CALLBACK
-TEST(System, demangle) {
-  char expected[] = "folly_test::ThisIsAVeryLongStructureName";
-  EXPECT_STREQ(
-      expected,
-      demangle(typeid(folly_test::ThisIsAVeryLongStructureName)).c_str());
-
-  {
-    char buf[sizeof(expected)];
-    EXPECT_EQ(sizeof(expected) - 1,
-              demangle(typeid(folly_test::ThisIsAVeryLongStructureName),
-                       buf, sizeof(buf)));
-    EXPECT_STREQ(expected, buf);
-
-    EXPECT_EQ(sizeof(expected) - 1,
-              demangle(typeid(folly_test::ThisIsAVeryLongStructureName),
-                       buf, 11));
-    EXPECT_STREQ("folly_test", buf);
-  }
-}
-#endif
-
 namespace {
 
-template<template<class,class> class VectorType>
+template <template <class, class> class VectorType>
 void splitTest() {
   VectorType<string,std::allocator<string> > parts;
 
@@ -785,7 +642,7 @@ void splitTest() {
   EXPECT_EQ(parts[3], "");
 }
 
-template<template<class,class> class VectorType>
+template <template <class, class> class VectorType>
 void piecesTest() {
   VectorType<StringPiece,std::allocator<StringPiece> > pieces;
   VectorType<StringPiece,std::allocator<StringPiece> > pieces2;
@@ -1036,7 +893,7 @@ TEST(Split, std_string_fixed) {
 TEST(Split, fixed_convert) {
   StringPiece a, d;
   int b;
-  double c;
+  double c = 0;
 
   EXPECT_TRUE(folly::split(':', "a:13:14.7:b", a, b, c, d));
   EXPECT_EQ("a", a);
@@ -1057,8 +914,51 @@ TEST(Split, fixed_convert) {
   EXPECT_EQ(13, b);
   EXPECT_EQ("14.7:b", d);
 
-  EXPECT_THROW(folly::split<false>(':', "a:13:14.7:b", a, b, c),
-               std::range_error);
+
+  // Enable verifying that a line only contains one field
+  EXPECT_TRUE(folly::split(' ', "hello", a));
+  EXPECT_FALSE(folly::split(' ', "hello world", a));
+}
+
+namespace my {
+
+enum class Color {
+  Red,
+  Blue,
+};
+
+enum class ColorErrorCode { INVALID_COLOR };
+
+struct ColorError : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
+
+ColorError makeConversionError(ColorErrorCode, StringPiece sp) {
+  return ColorError("Invalid my::Color representation : " + sp.str());
+}
+
+Expected<StringPiece, ColorErrorCode> parseTo(
+    StringPiece in,
+    Color& out) noexcept {
+  if (in == "R") {
+    out = Color::Red;
+  } else if (in == "B") {
+    out = Color::Blue;
+  } else {
+    return makeUnexpected(ColorErrorCode::INVALID_COLOR);
+  }
+  return StringPiece(in.end(), in.end());
+}
+}
+
+TEST(Split, fixed_convert_custom) {
+  my::Color c1, c2;
+
+  EXPECT_TRUE(folly::split(',', "R,B", c1, c2));
+  EXPECT_EQ(c1, my::Color::Red);
+  EXPECT_EQ(c2, my::Color::Blue);
+
+  EXPECT_THROW(folly::split(',', "B,G", c1, c2), my::ColorError);
 }
 
 TEST(String, join) {
@@ -1095,7 +995,7 @@ TEST(String, hexlify) {
   string input1 = "0123";
   string output1;
   EXPECT_TRUE(hexlify(input1, output1));
-  EXPECT_EQ(output1, "30313233");
+  EXPECT_EQ("30313233", output1);
 
   fbstring input2 = "abcdefg";
   input2[1] = 0;
@@ -1103,7 +1003,11 @@ TEST(String, hexlify) {
   input2[5] = 0xb6;
   fbstring output2;
   EXPECT_TRUE(hexlify(input2, output2));
-  EXPECT_EQ(output2, "610063ff65b667");
+  EXPECT_EQ("610063ff65b667", output2);
+
+  EXPECT_EQ("666f6f626172", hexlify("foobar"));
+  auto bytes = folly::make_array<uint8_t>(1, 2, 3, 4);
+  EXPECT_EQ("01020304", hexlify(ByteRange{bytes.data(), bytes.size()}));
 }
 
 TEST(String, unhexlify) {
@@ -1131,6 +1035,10 @@ TEST(String, unhexlify) {
   string input4 = "xy";
   string output4;
   EXPECT_FALSE(unhexlify(input4, output4));
+
+  EXPECT_EQ("foobar", unhexlify("666f6f626172"));
+  EXPECT_EQ(StringPiece("foo\0bar", 7), unhexlify("666f6f00626172"));
+  EXPECT_THROW(unhexlify("666f6fzz626172"), std::domain_error);
 }
 
 TEST(String, backslashify) {
@@ -1195,11 +1103,12 @@ char* copyWithSameAlignment(char* dst, const char* src, size_t length) {
 void testToLowerAscii(Range<const char*> src) {
   // Allocate extra space so we can make copies that start at the
   // same alignment (byte, word, quadword, etc) as the source buffer.
-  char controlBuf[src.size() + 7];
-  char* control = copyWithSameAlignment(controlBuf, src.begin(), src.size());
+  auto controlBuf = std::vector<char>(src.size() + 7);
+  char* control =
+      copyWithSameAlignment(controlBuf.data(), src.begin(), src.size());
 
-  char testBuf[src.size() + 7];
-  char* test = copyWithSameAlignment(testBuf, src.begin(), src.size());
+  auto testBuf = std::vector<char>(src.size() + 7);
+  char* test = copyWithSameAlignment(testBuf.data(), src.begin(), src.size());
 
   for (size_t i = 0; i < src.size(); i++) {
     control[i] = tolower(control[i]);
@@ -1210,7 +1119,7 @@ void testToLowerAscii(Range<const char*> src) {
   }
 }
 
-} // anon namespace
+} // namespace
 
 TEST(String, toLowerAsciiAligned) {
   static const size_t kSize = 256;
@@ -1239,93 +1148,240 @@ TEST(String, toLowerAsciiUnaligned) {
   }
 }
 
-//////////////////////////////////////////////////////////////////////
+TEST(String, whitespace) {
+  // trimWhitespace:
+  EXPECT_EQ("kavabanga",
+        trimWhitespace("kavabanga"));
+  EXPECT_EQ("kavabanga",
+        trimWhitespace("kavabanga \t \n  "));
+  EXPECT_EQ("kavabanga",
+        trimWhitespace("   \t \r \n \n kavabanga"));
+  EXPECT_EQ("kavabanga",
+        trimWhitespace("\t \r \n   kavabanga \t \n  "));
+  EXPECT_EQ("kavabanga",
+        trimWhitespace("   \t \r \n \n kavabanga"));
+  EXPECT_EQ("kavabanga",
+        trimWhitespace("\t \r \n   kavabanga \t \n  "));
+  EXPECT_EQ(
+    ltrimWhitespace(rtrimWhitespace("kavabanga")),
+    rtrimWhitespace(ltrimWhitespace("kavabanga")));
+  EXPECT_EQ(
+    ltrimWhitespace(rtrimWhitespace("kavabanga  \r\t\n")),
+    rtrimWhitespace(ltrimWhitespace("kavabanga  \r\t\n")));
+  EXPECT_EQ("", trimWhitespace("\t \r \n   \t \n  "));
+  EXPECT_EQ("", trimWhitespace(""));
+  EXPECT_EQ("", trimWhitespace("\t"));
+  EXPECT_EQ("", trimWhitespace("\r"));
+  EXPECT_EQ("", trimWhitespace("\n"));
+  EXPECT_EQ("", trimWhitespace("\t "));
+  EXPECT_EQ("", trimWhitespace("\r  "));
+  EXPECT_EQ("", trimWhitespace("\n   "));
+  EXPECT_EQ("", trimWhitespace("    \t"));
+  EXPECT_EQ("", trimWhitespace("    \r"));
+  EXPECT_EQ("", trimWhitespace("    \n"));
 
-BENCHMARK(splitOnSingleChar, iters) {
-  static const std::string line = "one:two:three:four";
-  for (size_t i = 0; i < iters << 4; ++i) {
-    std::vector<StringPiece> pieces;
-    folly::split(':', line, pieces);
-  }
+  // ltrimWhitespace:
+  EXPECT_EQ("kavabanga", ltrimWhitespace("\t kavabanga"));
+  EXPECT_EQ("kavabanga \r\n", ltrimWhitespace("\t kavabanga \r\n"));
+  EXPECT_EQ("", ltrimWhitespace("\r "));
+  EXPECT_EQ("", ltrimWhitespace("\n   "));
+  EXPECT_EQ("", ltrimWhitespace("\r   "));
+
+  // rtrimWhitespace:
+  EXPECT_EQ("\t kavabanga", rtrimWhitespace("\t kavabanga"));
+  EXPECT_EQ("\t kavabanga", rtrimWhitespace("\t kavabanga \r\n"));
+  EXPECT_EQ("", rtrimWhitespace("\r "));
+  EXPECT_EQ("", rtrimWhitespace("\n   "));
+  EXPECT_EQ("", rtrimWhitespace("\r   "));
 }
 
-BENCHMARK(splitOnSingleCharFixed, iters) {
-  static const std::string line = "one:two:three:four";
-  for (size_t i = 0; i < iters << 4; ++i) {
-    StringPiece a, b, c, d;
-    folly::split(':', line, a, b, c, d);
-  }
+TEST(String, stripLeftMargin_really_empty) {
+  auto input = "";
+  auto expected = "";
+  EXPECT_EQ(expected, stripLeftMargin(input));
 }
 
-BENCHMARK(splitOnSingleCharFixedAllowExtra, iters) {
-  static const std::string line = "one:two:three:four";
-  for (size_t i = 0; i < iters << 4; ++i) {
-    StringPiece a, b, c, d;
-    folly::split<false>(':', line, a, b, c, d);
-  }
+TEST(String, stripLeftMargin_empty) {
+  auto input = R"TEXT(
+  )TEXT";
+  auto expected = "";
+  EXPECT_EQ(expected, stripLeftMargin(input));
 }
 
-BENCHMARK(splitStr, iters) {
-  static const std::string line = "one-*-two-*-three-*-four";
-  for (size_t i = 0; i < iters << 4; ++i) {
-    std::vector<StringPiece> pieces;
-    folly::split("-*-", line, pieces);
-  }
+TEST(String, stripLeftMargin_only_whitespace) {
+  //  using ~ as a marker
+  string input = R"TEXT(
+    ~
+  )TEXT";
+  input = boost::regex_replace(input, boost::regex("~"), "");
+  EXPECT_EQ("\n    \n  ", input);
+  auto expected = "\n";
+  EXPECT_EQ(expected, stripLeftMargin(input));
 }
 
-BENCHMARK(splitStrFixed, iters) {
-  static const std::string line = "one-*-two-*-three-*-four";
-  for (size_t i = 0; i < iters << 4; ++i) {
-    StringPiece a, b, c, d;
-    folly::split("-*-", line, a, b, c, d);
-  }
+TEST(String, stripLeftMargin_only_uneven_whitespace) {
+  //  using ~ as a marker1
+  string input = R"TEXT(
+    ~
+      ~
+  )TEXT";
+  input = boost::regex_replace(input, boost::regex("~"), "");
+  EXPECT_EQ("\n    \n      \n  ", input);
+  auto expected = "\n\n";
+
+  EXPECT_EQ(expected, stripLeftMargin(input));
 }
 
-BENCHMARK(boost_splitOnSingleChar, iters) {
-  static const std::string line = "one:two:three:four";
-  bool(*pred)(char) = [] (char c) -> bool { return c == ':'; };
-  for (size_t i = 0; i < iters << 4; ++i) {
-    std::vector<boost::iterator_range<std::string::const_iterator> > pieces;
-    boost::split(pieces, line, pred);
-  }
+TEST(String, stripLeftMargin_one_line) {
+  auto input = R"TEXT(
+    hi there bob!
+  )TEXT";
+  auto expected = "hi there bob!\n";
+  EXPECT_EQ(expected, stripLeftMargin(input));
 }
 
-BENCHMARK(joinCharStr, iters) {
-  static const std::vector<std::string> input = {
-    "one", "two", "three", "four", "five", "six", "seven" };
-  for (size_t i = 0; i < iters << 4; ++i) {
-    std::string output;
-    folly::join(':', input, output);
-  }
+TEST(String, stripLeftMargin_two_lines) {
+  auto input = R"TEXT(
+    hi there bob!
+    nice weather today!
+  )TEXT";
+  auto expected = "hi there bob!\nnice weather today!\n";
+  EXPECT_EQ(expected, stripLeftMargin(input));
 }
 
-BENCHMARK(joinStrStr, iters) {
-  static const std::vector<std::string> input = {
-    "one", "two", "three", "four", "five", "six", "seven" };
-  for (size_t i = 0; i < iters << 4; ++i) {
-    std::string output;
-    folly::join(":", input, output);
-  }
+TEST(String, stripLeftMargin_three_lines_uneven) {
+  auto input = R"TEXT(
+      hi there bob!
+    nice weather today!
+      so long!
+  )TEXT";
+  auto expected = "  hi there bob!\nnice weather today!\n  so long!\n";
+  EXPECT_EQ(expected, stripLeftMargin(input));
 }
 
-BENCHMARK(joinInt, iters) {
-  static const auto input = {
-    123, 456, 78910, 1112, 1314, 151, 61718 };
-  for (size_t i = 0; i < iters << 4; ++i) {
-    std::string output;
-    folly::join(":", input, output);
-  }
+TEST(String, stripLeftMargin_preceding_blank_lines) {
+  auto input = R"TEXT(
+
+
+    hi there bob!
+  )TEXT";
+  auto expected = "\n\nhi there bob!\n";
+  EXPECT_EQ(expected, stripLeftMargin(input));
 }
 
-int main(int argc, char *argv[]) {
-  testing::InitGoogleTest(&argc, argv);
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
-  auto ret = RUN_ALL_TESTS();
-  if (!ret) {
-    initBenchmark();
-    if (FLAGS_benchmark) {
-      folly::runBenchmarks();
-    }
-  }
-  return ret;
+TEST(String, stripLeftMargin_succeeding_blank_lines) {
+  auto input = R"TEXT(
+    hi there bob!
+
+
+  )TEXT";
+  auto expected = "hi there bob!\n\n\n";
+  EXPECT_EQ(expected, stripLeftMargin(input));
+}
+
+TEST(String, stripLeftMargin_interstitial_undented_whiteline) {
+  //  using ~ as a marker
+  string input = R"TEXT(
+      hi there bob!
+    ~
+      so long!
+  )TEXT";
+  input = boost::regex_replace(input, boost::regex(" +~"), "");
+  EXPECT_EQ("\n      hi there bob!\n\n      so long!\n  ", input);
+  auto expected = "hi there bob!\n\nso long!\n";
+  EXPECT_EQ(expected, stripLeftMargin(input));
+}
+
+TEST(String, stripLeftMargin_interstitial_dedented_whiteline) {
+  //  using ~ as a marker
+  string input = R"TEXT(
+      hi there bob!
+    ~
+      so long!
+  )TEXT";
+  input = boost::regex_replace(input, boost::regex("~"), "");
+  EXPECT_EQ("\n      hi there bob!\n    \n      so long!\n  ", input);
+  auto expected = "hi there bob!\n\nso long!\n";
+  EXPECT_EQ(expected, stripLeftMargin(input));
+}
+
+TEST(String, stripLeftMargin_interstitial_equidented_whiteline) {
+  //  using ~ as a marker
+  string input = R"TEXT(
+      hi there bob!
+      ~
+      so long!
+  )TEXT";
+  input = boost::regex_replace(input, boost::regex("~"), "");
+  EXPECT_EQ("\n      hi there bob!\n      \n      so long!\n  ", input);
+  auto expected = "hi there bob!\n\nso long!\n";
+  EXPECT_EQ(expected, stripLeftMargin(input));
+}
+
+TEST(String, stripLeftMargin_interstitial_indented_whiteline) {
+  //  using ~ as a marker
+  string input = R"TEXT(
+      hi there bob!
+        ~
+      so long!
+  )TEXT";
+  input = boost::regex_replace(input, boost::regex("~"), "");
+  EXPECT_EQ("\n      hi there bob!\n        \n      so long!\n  ", input);
+  auto expected = "hi there bob!\n  \nso long!\n";
+  EXPECT_EQ(expected, stripLeftMargin(input));
+}
+
+TEST(String, stripLeftMargin_no_pre_whitespace) {
+  //  using ~ as a marker
+  string input = R"TEXT(      hi there bob!
+        ~
+      so long!
+  )TEXT";
+  input = boost::regex_replace(input, boost::regex("~"), "");
+  EXPECT_EQ("      hi there bob!\n        \n      so long!\n  ", input);
+  auto expected = "hi there bob!\n  \nso long!\n";
+  EXPECT_EQ(expected, stripLeftMargin(input));
+}
+
+TEST(String, stripLeftMargin_no_post_whitespace) {
+  //  using ~ as a marker
+  string input = R"TEXT(
+      hi there bob!
+        ~
+      so long!  )TEXT";
+  input = boost::regex_replace(input, boost::regex("~"), "");
+  EXPECT_EQ("\n      hi there bob!\n        \n      so long!  ", input);
+  auto expected = "hi there bob!\n  \nso long!  ";
+  EXPECT_EQ(expected, stripLeftMargin(input));
+}
+
+const folly::StringPiece kTestUTF8 = u8"This is \U0001F602 stuff!";
+
+TEST(UTF8StringPiece, valid_utf8) {
+  folly::StringPiece sp = kTestUTF8;
+  UTF8StringPiece utf8 = sp;
+  // utf8.size() not available since it's not a random-access range
+  EXPECT_EQ(16, utf8.walk_size());
+}
+
+TEST(UTF8StringPiece, valid_suffix) {
+  UTF8StringPiece utf8 = kTestUTF8.subpiece(8);
+  EXPECT_EQ(8, utf8.walk_size());
+}
+
+TEST(UTF8StringPiece, empty_mid_codepoint) {
+  UTF8StringPiece utf8 = kTestUTF8.subpiece(9, 0); // okay since it's empty
+  EXPECT_EQ(0, utf8.walk_size());
+}
+
+TEST(UTF8StringPiece, invalid_mid_codepoint) {
+  EXPECT_THROW(UTF8StringPiece(kTestUTF8.subpiece(9, 1)), std::out_of_range);
+}
+
+TEST(UTF8StringPiece, valid_implicit_conversion) {
+  std::string input = u8"\U0001F602\U0001F602\U0001F602";
+  auto checkImplicitCtor = [](UTF8StringPiece implicitCtor) {
+    return implicitCtor.walk_size();
+  };
+  EXPECT_EQ(3, checkImplicitCtor(input));
 }

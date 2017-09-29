@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,12 +16,12 @@
 
 #include <folly/Arena.h>
 #include <folly/Memory.h>
+#include <folly/portability/GTest.h>
 
 #include <set>
 #include <vector>
 
 #include <glog/logging.h>
-#include <gtest/gtest.h>
 
 using namespace folly;
 
@@ -155,6 +155,17 @@ TEST(Arena, SizeLimit) {
   void* a = arena.allocate(sizeof(size_t));
   EXPECT_TRUE(a != nullptr);
   EXPECT_THROW(arena.allocate(maxSize + 1), std::bad_alloc);
+}
+
+TEST(Arena, MoveArena) {
+  SysArena arena(sizeof(size_t) * 2);
+  arena.allocate(sizeof(size_t));
+  auto totalSize = arena.totalSize();
+  auto bytesUsed = arena.bytesUsed();
+
+  SysArena moved(std::move(arena));
+  EXPECT_EQ(totalSize, moved.totalSize());
+  EXPECT_EQ(bytesUsed, moved.bytesUsed());
 }
 
 int main(int argc, char *argv[]) {

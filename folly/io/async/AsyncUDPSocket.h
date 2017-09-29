@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,14 +16,15 @@
 
 #pragma once
 
-#include <folly/io/IOBuf.h>
-#include <folly/ScopeGuard.h>
-#include <folly/io/async/AsyncSocketException.h>
-#include <folly/io/async/EventHandler.h>
-#include <folly/io/async/EventBase.h>
-#include <folly/SocketAddress.h>
-
 #include <memory>
+
+#include <folly/ScopeGuard.h>
+#include <folly/SocketAddress.h>
+#include <folly/io/IOBuf.h>
+#include <folly/io/async/AsyncSocketBase.h>
+#include <folly/io/async/AsyncSocketException.h>
+#include <folly/io/async/EventBase.h>
+#include <folly/io/async/EventHandler.h>
 
 namespace folly {
 
@@ -73,7 +74,7 @@ class AsyncUDPSocket : public EventHandler {
      */
     virtual void onReadClosed() noexcept = 0;
 
-    virtual ~ReadCallback() {}
+    virtual ~ReadCallback() = default;
   };
 
   /**
@@ -81,12 +82,12 @@ class AsyncUDPSocket : public EventHandler {
    * given eventbase
    */
   explicit AsyncUDPSocket(EventBase* evb);
-  ~AsyncUDPSocket();
+  ~AsyncUDPSocket() override;
 
   /**
    * Returns the address server is listening on
    */
-  const folly::SocketAddress& address() const {
+  virtual const folly::SocketAddress& address() const {
     CHECK_NE(-1, fd_) << "Server not yet bound to an address";
     return localAddress_;
   }
@@ -97,7 +98,7 @@ class AsyncUDPSocket : public EventHandler {
    * use `address()` method above to get it after this method successfully
    * returns.
    */
-  void bind(const folly::SocketAddress& address);
+  virtual void bind(const folly::SocketAddress& address);
 
   /**
    * Use an already bound file descriptor. You can either transfer ownership
@@ -105,34 +106,40 @@ class AsyncUDPSocket : public EventHandler {
    * FDOwnership::SHARED. In case FD is shared, it will not be `close`d in
    * destructor.
    */
-  void setFD(int fd, FDOwnership ownership);
+  virtual void setFD(int fd, FDOwnership ownership);
 
   /**
    * Send the data in buffer to destination. Returns the return code from
-   * ::sendto.
+   * ::sendmsg.
    */
-  ssize_t write(const folly::SocketAddress& address,
-                const std::unique_ptr<folly::IOBuf>& buf);
+  virtual ssize_t write(const folly::SocketAddress& address,
+                        const std::unique_ptr<folly::IOBuf>& buf);
+
+  /**
+   * Send data in iovec to destination. Returns the return code from sendmsg.
+   */
+  virtual ssize_t writev(const folly::SocketAddress& address,
+                         const struct iovec* vec, size_t veclen);
 
   /**
    * Start reading datagrams
    */
-  void resumeRead(ReadCallback* cob);
+  virtual void resumeRead(ReadCallback* cob);
 
   /**
    * Pause reading datagrams
    */
-  void pauseRead();
+  virtual void pauseRead();
 
   /**
    * Stop listening on the socket.
    */
-  void close();
+  virtual void close();
 
   /**
    * Get internal FD used by this socket
    */
-  int getFD() const {
+  virtual int getFD() const {
     CHECK_NE(-1, fd_) << "Need to bind before getting FD out";
     return fd_;
   }
@@ -140,15 +147,35 @@ class AsyncUDPSocket : public EventHandler {
   /**
    * Set reuse port mode to call bind() on the same address multiple times
    */
-  void setReusePort(bool reusePort) {
+  virtual void setReusePort(bool reusePort) {
     reusePort_ = reusePort;
   }
+
+  /**
+   * Set SO_REUSEADDR flag on the socket. Default is ON.
+   */
+  virtual void setReuseAddr(bool reuseAddr) {
+    reuseAddr_ = reuseAddr;
+  }
+
+  EventBase* getEventBase() const {
+    return eventBase_;
+  }
+
+ protected:
+  virtual ssize_t sendmsg(int socket, const struct msghdr* message, int flags) {
+    return ::sendmsg(socket, message, flags);
+  }
+
+  // Non-null only when we are reading
+  ReadCallback* readCallback_;
+
  private:
   AsyncUDPSocket(const AsyncUDPSocket&) = delete;
   AsyncUDPSocket& operator=(const AsyncUDPSocket&) = delete;
 
   // EventHandler
-  void handlerReady(uint16_t events) noexcept;
+  void handlerReady(uint16_t events) noexcept override;
 
   void handleRead() noexcept;
   bool updateRegistration() noexcept;
@@ -162,10 +189,8 @@ class AsyncUDPSocket : public EventHandler {
   // Temp space to receive client address
   folly::SocketAddress clientAddress_;
 
-  // Non-null only when we are reading
-  ReadCallback* readCallback_;
-
+  bool reuseAddr_{true};
   bool reusePort_{false};
 };
 
-} // Namespace
+} // namespace folly

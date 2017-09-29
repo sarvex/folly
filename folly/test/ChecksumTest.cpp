@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,11 +15,14 @@
  */
 
 #include <folly/Checksum.h>
-#include <gflags/gflags.h>
-#include <gtest/gtest.h>
+
+#include <boost/crc.hpp>
+
 #include <folly/Benchmark.h>
 #include <folly/Hash.h>
 #include <folly/detail/ChecksumDetail.h>
+#include <folly/portability/GFlags.h>
+#include <folly/portability/GTest.h>
 
 namespace {
 const unsigned int BUFFER_SIZE = 512 * 1024 * sizeof(uint64_t);
@@ -87,6 +90,17 @@ void testCRC32CContinuation(
   }
 }
 
+void testMatchesBoost32Type() {
+  for (auto expected : expectedResults) {
+    boost::crc_32_type result;
+    result.process_bytes(buffer + expected.offset, expected.length);
+    const uint32_t boostResult = result.checksum();
+    const uint32_t follyResult =
+        folly::crc32_type(buffer + expected.offset, expected.length);
+    EXPECT_EQ(follyResult, boostResult);
+  }
+}
+
 } // namespace
 
 TEST(Checksum, crc32c_software) {
@@ -107,6 +121,19 @@ TEST(Checksum, crc32c_hardware) {
   }
 }
 
+TEST(Checksum, crc32c_hardware_eq) {
+  if (folly::detail::crc32c_hw_supported()) {
+    for (int i = 0; i < 1000; i++) {
+      auto sw = folly::detail::crc32c_sw(buffer, i, 0);
+      auto hw = folly::detail::crc32c_hw(buffer, i, 0);
+      EXPECT_EQ(sw, hw);
+    }
+  } else {
+    LOG(WARNING) << "skipping hardware-accelerated CRC-32C tests"
+                 << " (not supported on this CPU)";
+  }
+}
+
 TEST(Checksum, crc32c_continuation_hardware) {
   if (folly::detail::crc32c_hw_supported()) {
     testCRC32CContinuation(folly::detail::crc32c_hw);
@@ -122,6 +149,54 @@ TEST(Checksum, crc32c_autodetect) {
 
 TEST(Checksum, crc32c_continuation_autodetect) {
   testCRC32CContinuation(folly::crc32c);
+}
+
+TEST(Checksum, crc32) {
+  if (folly::detail::crc32c_hw_supported()) {
+    // Just check that sw and hw match
+    for (auto expected : expectedResults) {
+      uint32_t sw_res =
+          folly::detail::crc32_sw(buffer + expected.offset, expected.length, 0);
+      uint32_t hw_res =
+          folly::detail::crc32_hw(buffer + expected.offset, expected.length, 0);
+      EXPECT_EQ(sw_res, hw_res);
+    }
+  } else {
+    LOG(WARNING) << "skipping hardware-accelerated CRC-32 tests"
+                 << " (not supported on this CPU)";
+  }
+}
+
+TEST(Checksum, crc32_continuation) {
+  if (folly::detail::crc32c_hw_supported()) {
+    // Just check that sw and hw match
+    for (auto expected : expectedResults) {
+      auto halflen = expected.length / 2;
+      uint32_t sw_res =
+          folly::detail::crc32_sw(buffer + expected.offset, halflen, 0);
+      sw_res = folly::detail::crc32_sw(
+          buffer + expected.offset + halflen, halflen, sw_res);
+      uint32_t hw_res =
+          folly::detail::crc32_hw(buffer + expected.offset, halflen, 0);
+      hw_res = folly::detail::crc32_hw(
+          buffer + expected.offset + halflen, halflen, hw_res);
+      EXPECT_EQ(sw_res, hw_res);
+      uint32_t sw_res2 =
+          folly::detail::crc32_sw(buffer + expected.offset, halflen * 2, 0);
+      EXPECT_EQ(sw_res, sw_res2);
+      uint32_t hw_res2 =
+          folly::detail::crc32_hw(buffer + expected.offset, halflen * 2, 0);
+      EXPECT_EQ(hw_res, hw_res2);
+    }
+  } else {
+    LOG(WARNING) << "skipping hardware-accelerated CRC-32 tests"
+                 << " (not supported on this CPU)";
+  }
+}
+
+TEST(Checksum, crc32_type) {
+  // Test that crc32_type matches boost::crc_32_type
+  testMatchesBoost32Type();
 }
 
 void benchmarkHardwareCRC32C(unsigned long iters, size_t blockSize) {
@@ -145,6 +220,27 @@ void benchmarkSoftwareCRC32C(unsigned long iters, size_t blockSize) {
   }
 }
 
+void benchmarkHardwareCRC32(unsigned long iters, size_t blockSize) {
+  if (folly::detail::crc32_hw_supported()) {
+    uint32_t checksum;
+    for (unsigned long i = 0; i < iters; i++) {
+      checksum = folly::detail::crc32_hw(buffer, blockSize);
+      folly::doNotOptimizeAway(checksum);
+    }
+  } else {
+    LOG(WARNING) << "skipping hardware-accelerated CRC-32 benchmarks"
+                 << " (not supported on this CPU)";
+  }
+}
+
+void benchmarkSoftwareCRC32(unsigned long iters, size_t blockSize) {
+  uint32_t checksum;
+  for (unsigned long i = 0; i < iters; i++) {
+    checksum = folly::detail::crc32_sw(buffer, blockSize);
+    folly::doNotOptimizeAway(checksum);
+  }
+}
+
 // This test fits easily in the L1 cache on modern server processors,
 // and thus it mainly measures the speed of the checksum computation.
 BENCHMARK(crc32c_hardware_1KB_block, iters) {
@@ -153,6 +249,14 @@ BENCHMARK(crc32c_hardware_1KB_block, iters) {
 
 BENCHMARK(crc32c_software_1KB_block, iters) {
   benchmarkSoftwareCRC32C(iters, 1024);
+}
+
+BENCHMARK(crc32_hardware_1KB_block, iters) {
+  benchmarkHardwareCRC32(iters, 1024);
+}
+
+BENCHMARK(crc32_software_1KB_block, iters) {
+  benchmarkSoftwareCRC32(iters, 1024);
 }
 
 BENCHMARK_DRAW_LINE();
@@ -166,6 +270,14 @@ BENCHMARK(crc32c_software_64KB_block, iters) {
   benchmarkSoftwareCRC32C(iters, 64 * 1024);
 }
 
+BENCHMARK(crc32_hardware_64KB_block, iters) {
+  benchmarkHardwareCRC32(iters, 64 * 1024);
+}
+
+BENCHMARK(crc32_software_64KB_block, iters) {
+  benchmarkSoftwareCRC32(iters, 64 * 1024);
+}
+
 BENCHMARK_DRAW_LINE();
 
 // This test is too big for the L2 cache but fits in L3
@@ -177,6 +289,13 @@ BENCHMARK(crc32c_software_512KB_block, iters) {
   benchmarkSoftwareCRC32C(iters, 512 * 1024);
 }
 
+BENCHMARK(crc32_hardware_512KB_block, iters) {
+  benchmarkHardwareCRC32(iters, 512 * 1024);
+}
+
+BENCHMARK(crc32_software_512KB_block, iters) {
+  benchmarkSoftwareCRC32(iters, 512 * 1024);
+}
 
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);

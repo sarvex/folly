@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Facebook, Inc.
+ * Copyright 2017 Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,26 +14,26 @@
  * limitations under the License.
  */
 
-#ifndef FOLLY_LIFOSEM_H
-#define FOLLY_LIFOSEM_H
+#pragma once
 
-#include <string.h>
-#include <stdint.h>
-#include <atomic>
 #include <algorithm>
+#include <atomic>
+#include <cstdint>
+#include <cstring>
 #include <memory>
 #include <system_error>
 
 #include <folly/AtomicStruct.h>
 #include <folly/Baton.h>
+#include <folly/CachelinePadded.h>
 #include <folly/IndexedMemPool.h>
 #include <folly/Likely.h>
-#include <folly/detail/CacheLocality.h>
 
 namespace folly {
 
-template <template<typename> class Atom = std::atomic,
-          class BatonType = Baton<Atom>>
+template <
+    template <typename> class Atom = std::atomic,
+    class BatonType = Baton<Atom>>
 struct LifoSemImpl;
 
 /// LifoSem is a semaphore that wakes its waiters in a manner intended to
@@ -92,7 +92,7 @@ typedef LifoSemImpl<> LifoSem;
 /// The exception thrown when wait()ing on an isShutdown() LifoSem
 struct ShutdownSemError : public std::runtime_error {
   explicit ShutdownSemError(const std::string& msg);
-  virtual ~ShutdownSemError() noexcept;
+  ~ShutdownSemError() noexcept override;
 };
 
 namespace detail {
@@ -115,7 +115,7 @@ namespace detail {
 /// LifoSemRawNode is the actual pooled storage that backs LifoSemNode
 /// for user-specified Handoff types.  This is done so that we can have
 /// a large static IndexedMemPool of nodes, instead of per-type pools
-template <template<typename> class Atom>
+template <template <typename> class Atom>
 struct LifoSemRawNode {
   std::aligned_storage<sizeof(void*),alignof(void*)>::type raw;
 
@@ -131,22 +131,28 @@ struct LifoSemRawNode {
   typedef folly::IndexedMemPool<LifoSemRawNode<Atom>,32,200,Atom> Pool;
 
   /// Storage for all of the waiter nodes for LifoSem-s that use Atom
-  static Pool pool;
+  static Pool& pool();
 };
 
 /// Use this macro to declare the static storage that backs the raw nodes
 /// for the specified atomic type
-#define LIFOSEM_DECLARE_POOL(Atom, capacity)                       \
-    template<>                                                     \
-    folly::detail::LifoSemRawNode<Atom>::Pool                      \
-        folly::detail::LifoSemRawNode<Atom>::pool((capacity));
+#define LIFOSEM_DECLARE_POOL(Atom, capacity)                 \
+  namespace folly {                                          \
+  namespace detail {                                         \
+  template <>                                                \
+  LifoSemRawNode<Atom>::Pool& LifoSemRawNode<Atom>::pool() { \
+    static Pool* instance = new Pool((capacity));            \
+    return *instance;                                        \
+  }                                                          \
+  }                                                          \
+  }
 
 /// Handoff is a type not bigger than a void* that knows how to perform a
 /// single post() -> wait() communication.  It must have a post() method.
 /// If it has a wait() method then LifoSemBase's wait() implementation
 /// will work out of the box, otherwise you will need to specialize
 /// LifoSemBase::wait accordingly.
-template <typename Handoff, template<typename> class Atom>
+template <typename Handoff, template <typename> class Atom>
 struct LifoSemNode : public LifoSemRawNode<Atom> {
 
   static_assert(sizeof(Handoff) <= sizeof(LifoSemRawNode<Atom>::raw),
@@ -176,12 +182,12 @@ struct LifoSemNode : public LifoSemRawNode<Atom> {
   }
 };
 
-template <typename Handoff, template<typename> class Atom>
+template <typename Handoff, template <typename> class Atom>
 struct LifoSemNodeRecycler {
   void operator()(LifoSemNode<Handoff,Atom>* elem) const {
     elem->destroy();
-    auto idx = LifoSemRawNode<Atom>::pool.locateElem(elem);
-    LifoSemRawNode<Atom>::pool.recycleIndex(idx);
+    auto idx = LifoSemRawNode<Atom>::pool().locateElem(elem);
+    LifoSemRawNode<Atom>::pool().recycleIndex(idx);
   }
 };
 
@@ -311,13 +317,15 @@ class LifoSemHead {
 ///
 /// The Handoff type is responsible for arranging one wakeup notification.
 /// See LifoSemNode for more information on how to make your own.
-template <typename Handoff,
-          template<typename> class Atom = std::atomic>
-struct LifoSemBase : boost::noncopyable {
+template <typename Handoff, template <typename> class Atom = std::atomic>
+struct LifoSemBase {
 
   /// Constructor
-  explicit LifoSemBase(uint32_t initialValue = 0)
-    : head_(LifoSemHead::fresh(initialValue)) {}
+  constexpr explicit LifoSemBase(uint32_t initialValue = 0)
+      : head_(LifoSemHead::fresh(initialValue)) {}
+
+  LifoSemBase(LifoSemBase const&) = delete;
+  LifoSemBase& operator=(LifoSemBase const&) = delete;
 
   /// Silently saturates if value is already 2^32-1
   void post() {
@@ -347,7 +355,7 @@ struct LifoSemBase : boost::noncopyable {
 
   /// Returns true iff shutdown() has been called
   bool isShutdown() const {
-    return UNLIKELY(head_.load(std::memory_order_acquire).isShutdown());
+    return UNLIKELY(head_->load(std::memory_order_acquire).isShutdown());
   }
 
   /// Prevents blocking on this semaphore, causing all blocking wait()
@@ -357,9 +365,9 @@ struct LifoSemBase : boost::noncopyable {
   /// has already occurred will proceed normally.
   void shutdown() {
     // first set the shutdown bit
-    auto h = head_.load(std::memory_order_acquire);
+    auto h = head_->load(std::memory_order_acquire);
     while (!h.isShutdown()) {
-      if (head_.compare_exchange_strong(h, h.withShutdown())) {
+      if (head_->compare_exchange_strong(h, h.withShutdown())) {
         // success
         h = h.withShutdown();
         break;
@@ -371,7 +379,7 @@ struct LifoSemBase : boost::noncopyable {
     while (h.isNodeIdx()) {
       auto& node = idxToNode(h.idx());
       auto repl = h.withPop(node.next);
-      if (head_.compare_exchange_strong(h, repl)) {
+      if (head_->compare_exchange_strong(h, repl)) {
         // successful pop, wake up the waiter and move on.  The next
         // field is used to convey that this wakeup didn't consume a value
         node.setShutdownNotice();
@@ -455,7 +463,7 @@ struct LifoSemBase : boost::noncopyable {
     // this is actually linearizable, but we don't promise that because
     // we may want to add striping in the future to help under heavy
     // contention
-    auto h = head_.load(std::memory_order_acquire);
+    auto h = head_->load(std::memory_order_acquire);
     return h.isNodeIdx() ? 0 : h.value();
   }
 
@@ -475,14 +483,14 @@ struct LifoSemBase : boost::noncopyable {
   /// Returns a node that can be passed to decrOrLink
   template <typename... Args>
   UniquePtr allocateNode(Args&&... args) {
-    auto idx = LifoSemRawNode<Atom>::pool.allocIndex();
+    auto idx = LifoSemRawNode<Atom>::pool().allocIndex();
     if (idx != 0) {
       auto& node = idxToNode(idx);
       node.clearShutdownNotice();
       try {
         node.init(std::forward<Args>(args)...);
       } catch (...) {
-        LifoSemRawNode<Atom>::pool.recycleIndex(idx);
+        LifoSemRawNode<Atom>::pool().recycleIndex(idx);
         throw;
       }
       return UniquePtr(&node);
@@ -503,21 +511,15 @@ struct LifoSemBase : boost::noncopyable {
   }
 
  private:
-
-  folly::AtomicStruct<LifoSemHead,Atom> head_
-      FOLLY_ALIGN_TO_AVOID_FALSE_SHARING;
-
-  char padding_[folly::detail::CacheLocality::kFalseSharingRange -
-      sizeof(LifoSemHead)];
-
+  CachelinePadded<folly::AtomicStruct<LifoSemHead, Atom>> head_;
 
   static LifoSemNode<Handoff, Atom>& idxToNode(uint32_t idx) {
-    auto raw = &LifoSemRawNode<Atom>::pool[idx];
+    auto raw = &LifoSemRawNode<Atom>::pool()[idx];
     return *static_cast<LifoSemNode<Handoff, Atom>*>(raw);
   }
 
   static uint32_t nodeToIdx(const LifoSemNode<Handoff, Atom>& node) {
-    return LifoSemRawNode<Atom>::pool.locateElem(&node);
+    return LifoSemRawNode<Atom>::pool().locateElem(&node);
   }
 
   /// Either increments by n and returns 0, or pops a node and returns it.
@@ -527,16 +529,16 @@ struct LifoSemBase : boost::noncopyable {
     while (true) {
       assert(n > 0);
 
-      auto head = head_.load(std::memory_order_acquire);
+      auto head = head_->load(std::memory_order_acquire);
       if (head.isNodeIdx()) {
         auto& node = idxToNode(head.idx());
-        if (head_.compare_exchange_strong(head, head.withPop(node.next))) {
+        if (head_->compare_exchange_strong(head, head.withPop(node.next))) {
           // successful pop
           return head.idx();
         }
       } else {
         auto after = head.withValueIncr(n);
-        if (head_.compare_exchange_strong(head, after)) {
+        if (head_->compare_exchange_strong(head, after)) {
           // successful incr
           return 0;
         }
@@ -556,12 +558,12 @@ struct LifoSemBase : boost::noncopyable {
     assert(n > 0);
 
     while (true) {
-      auto head = head_.load(std::memory_order_acquire);
+      auto head = head_->load(std::memory_order_acquire);
 
       if (!head.isNodeIdx() && head.value() > 0) {
         // decr
         auto delta = std::min(n, head.value());
-        if (head_.compare_exchange_strong(head, head.withValueDecr(delta))) {
+        if (head_->compare_exchange_strong(head, head.withValueDecr(delta))) {
           n -= delta;
           return WaitResult::DECR;
         }
@@ -577,7 +579,7 @@ struct LifoSemBase : boost::noncopyable {
 
         auto& node = idxToNode(idx);
         node.next = head.isNodeIdx() ? head.idx() : 0;
-        if (head_.compare_exchange_strong(head, head.withPush(idx))) {
+        if (head_->compare_exchange_strong(head, head.withPush(idx))) {
           // push succeeded
           return WaitResult::PUSH;
         }
@@ -589,12 +591,10 @@ struct LifoSemBase : boost::noncopyable {
 
 } // namespace detail
 
-template <template<typename> class Atom, class BatonType>
+template <template <typename> class Atom, class BatonType>
 struct LifoSemImpl : public detail::LifoSemBase<BatonType, Atom> {
-  explicit LifoSemImpl(uint32_t v = 0)
+  constexpr explicit LifoSemImpl(uint32_t v = 0)
     : detail::LifoSemBase<BatonType, Atom>(v) {}
 };
 
 } // namespace folly
-
-#endif
